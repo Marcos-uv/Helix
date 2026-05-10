@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Helix Chat</title>
+  <link rel="stylesheet" href="./style.css?v=safe-1" />
+</head>
+<body>
+  <main class="app">
+    <section class="chat-card">
+      <header class="chat-header">
+        <div>
+          <h1>H.E.L.I.X</h1>
+          <p>Interface segura temporária</p>
+        </div>
+        <span id="status">Online</span>
+      </header>
+
+      <div id="messages" class="messages">
+        <article class="message assistant">
+          <strong>HELIX</strong>
+          <p>Olá. Interface básica ativa. Pode mandar mensagem.</p>
+        </article>
+      </div>
+
+      <form id="chatForm" class="chat-form">
+        <input
+          id="messageInput"
+          type="text"
+          placeholder="Digite sua mensagem..."
+          autocomplete="off"
+        />
+        <button id="sendButton" type="submit">Enviar</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="./script.js?v=safe-1"></script>
+</body>
+</html>

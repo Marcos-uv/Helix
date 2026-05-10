@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+psycopg2-binary
+requests
+psutil
+httpx
+SpeechRecognition
+pyttsx3
+pyaudio
+openai
+python-multipart
+elevenlabs
+playsound==1.2.2
