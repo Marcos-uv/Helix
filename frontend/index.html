@@ -3,39 +3,142 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Helix Chat</title>
-  <link rel="stylesheet" href="./style.css?v=safe-1" />
+  <title>Helix</title>
+  <link rel="stylesheet" href="./style.css?v=voice-record-23" />
 </head>
 <body>
-  <main class="app">
-    <section class="chat-card">
-      <header class="chat-header">
-        <div>
-          <h1>H.E.L.I.X</h1>
-          <p>Interface segura temporária</p>
-        </div>
-        <span id="status">Online</span>
-      </header>
-
-      <div id="messages" class="messages">
-        <article class="message assistant">
-          <strong>HELIX</strong>
-          <p>Olá. Interface básica ativa. Pode mandar mensagem.</p>
-        </article>
+  <main class="dashboard">
+    <header class="topbar">
+      <div class="brand">
+        <span>H.E.L.I.X</span>
+        <small class="online-dot">Online</small>
       </div>
 
-      <form id="chatForm" class="chat-form">
-        <input
-          id="messageInput"
-          type="text"
-          placeholder="Digite sua mensagem..."
-          autocomplete="off"
-        />
-        <button id="sendButton" type="submit">Enviar</button>
-      </form>
+      <div class="time-box">
+        <span id="clock">--:--:--</span>
+      </div>
+
+      <button class="settings-btn" type="button" title="Configuracoes">⚙</button>
+    </header>
+
+    <aside class="left-panel">
+      <section class="card collapsible-card">
+        <button class="card-title card-toggle" type="button">
+          System Stats
+          <span>▾</span>
+        </button>
+
+        <div class="card-content">
+          <div class="stat">
+            <span>CPU Usage</span>
+            <strong id="cpuPercent">--%</strong>
+          </div>
+          <div class="bar"><div id="cpuBar"></div></div>
+
+          <div class="stat">
+            <span>RAM Usage</span>
+            <strong id="ramUsage">--</strong>
+          </div>
+          <div class="bar"><div id="ramBar"></div></div>
+
+          <div class="stat">
+            <span>Disk Usage</span>
+            <strong id="diskUsage">--</strong>
+          </div>
+          <div class="bar"><div id="diskBar"></div></div>
+
+          <div class="mini-grid">
+            <div>CPU<br><strong id="cpuMini">--%</strong></div>
+            <div>Memory<br><strong id="memoryMini">--%</strong></div>
+            <div>Disk<br><strong id="diskMini">--%</strong></div>
+          </div>
+
+          <h4>Processes</h4>
+          <div id="processList" class="process-list"></div>
+
+          <small>Updated: <span id="lastUpdate">--</span></small>
+        </div>
+      </section>
+
+      <section class="card collapsible-card">
+        <button class="card-title card-toggle" type="button">
+          Weather
+          <span>▾</span>
+        </button>
+
+        <div class="card-content">
+          <div class="weather-temp">25.2°C</div>
+          <p>Gaspar, BR</p>
+
+          <div class="mini-grid">
+            <div>Humidity<br><strong>94%</strong></div>
+            <div>Wind<br><strong>5.8 m/s</strong></div>
+            <div>Feels<br><strong>26.3°C</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card collapsible-card">
+        <button class="card-title card-toggle" type="button">
+          System Uptime
+          <span>▾</span>
+        </button>
+
+        <div class="card-content">
+          <div class="uptime" id="uptime">--</div>
+
+          <div class="mini-grid">
+            <div>Session<br><strong>1</strong></div>
+            <div>Commands<br><strong id="commandCount">0</strong></div>
+          </div>
+
+          <div class="stat">
+            <span>System Load</span>
+            <strong id="systemLoad">--</strong>
+          </div>
+          <div class="bar"><div id="systemLoadBar"></div></div>
+        </div>
+      </section>
+    </aside>
+
+    <section class="center-panel">
+      <canvas id="helixOrb"></canvas>
+
+      <h1>H.E.L.I.X</h1>
+
+      <div class="listening-status">
+        <span></span>
+        Clique no microfone para falar
+      </div>
+
+      <div class="control-buttons">
+        <button id="micButton" type="button" title="Modo vivo de voz">🎙</button>
+      </div>
     </section>
+
+    <aside class="right-panel">
+      <section class="conversation-card">
+        <div class="conversation-header">
+          <h2>Conversation</h2>
+          <button id="clearChat" type="button">Clear</button>
+        </div>
+
+        <div id="messages" class="messages">
+          <article class="message helix">
+            <p>Olá, eu sou HELIX. Como posso ajudá-lo hoje?</p>
+            <small>Online</small>
+          </article>
+        </div>
+
+        <form id="chatForm" class="input-area">
+          <input id="messageInput" type="text" placeholder="Type a message..." />
+          <button id="sendButton" type="submit">➤</button>
+        </form>
+      </section>
+    </aside>
   </main>
 
-  <script src="./script.js?v=safe-1"></script>
+  <script src="./orb.js?v=voice-record-23"></script>
+  <script src="./script.js?v=voice-record-23"></script>
 </body>
 </html>

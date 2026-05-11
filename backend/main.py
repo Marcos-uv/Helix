@@ -11,15 +11,20 @@ from backend.api.system_routes import router as system_router
 from backend.api.obsidian_routes import router as obsidian_router
 from backend.api.memory_routes import router as memory_router
 from backend.api.voice_routes import router as voice_router
+from backend.api.dev_environment_routes import router as dev_environment_router
+
 from backend.core.database import get_db, init_db
 from backend.core.obsidian_service import (
     ensure_obsidian_structure,
     log_error_to_obsidian,
     log_event_to_obsidian,
 )
+from fastapi.responses import FileResponse
+from backend.core.tts_edge import generate_tts_audio
+
 from backend.schemas.chat_schema import ChatRequest
 from backend.services.chat_service import process_chat_logic
-from backend.api.dev_environment_routes import router as dev_environment_router
+from pydantic import BaseModel
 
 
 app = FastAPI()
@@ -59,7 +64,11 @@ app.add_middleware(
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 if FRONTEND_DIR.exists():
-    app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    app.mount(
+        "/app",
+        StaticFiles(directory=FRONTEND_DIR, html=True),
+        name="frontend",
+    )
 
 
 @app.on_event("startup")
@@ -68,23 +77,31 @@ def startup():
 
     try:
         ensure_obsidian_structure()
+
         log_event_to_obsidian(
             event="Backend iniciado.",
             context="startup",
             details="FastAPI iniciou e verificou a estrutura do Obsidian.",
         )
+
     except Exception as exc:
         print(f"Erro ao registrar evento de startup no Obsidian: {exc}")
 
 
 @app.get("/")
 def home():
-    return {"message": "Helix backend rodando!"}
+    return {
+        "message": "Helix backend rodando!",
+        "app": "/app",
+        "status": "/status",
+    }
 
 
 @app.get("/status")
 def status():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+    }
 
 
 app.include_router(system_router)
@@ -96,23 +113,24 @@ app.include_router(dev_environment_router)
 
 @app.post("/chat")
 async def chat(request: ChatRequest, db: Session = Depends(get_db)):
+    return await process_chat_logic(request, db)
+
+class VoiceText(BaseModel):
+    text: str
+@app.post("/tts")
+async def tts(request: VoiceText):
     try:
-        return await process_chat_logic(request, db)
+        audio_path = await generate_tts_audio(request.text)
+
+        return FileResponse(
+            path=str(audio_path),
+            media_type="audio/mpeg",
+            filename="helix_tts.mp3",
+        )
 
     except Exception as e:
-        print("ERRO /chat:", e)
-
-        try:
-            log_error_to_obsidian(
-                error=str(e),
-                context="/chat",
-                user_message=request.message,
-                user_name=request.user_name,
-            )
-        except Exception as log_exc:
-            print(f"Erro ao registrar erro no Obsidian: {log_exc}")
-
+        print(f"ERRO NO /tts EDGE-TTS: {e}")
         return {
-            "error": str(e),
-            "response": "Erro ao processar mensagem.",
+            "error": "Falha ao gerar áudio com edge-tts.",
+            "detail": str(e),
         }

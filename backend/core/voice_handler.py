@@ -2,11 +2,14 @@ import os
 import subprocess
 import tempfile
 import threading
+import asyncio
 from pathlib import Path
 
-import httpx
 import pyttsx3
 import speech_recognition as sr
+
+from backend.core.tts_edge import generate_tts_audio
+
 
 recognizer = sr.Recognizer()
 _speech_lock = threading.Lock()
@@ -83,92 +86,40 @@ $player.Close()
 
 
 # =========================
-# 🔊 ELEVENLABS
+# 🔊 EDGE TTS
 # =========================
-def generate_elevenlabs_audio(text: str) -> bytes | None:
+def _speak_with_edge_tts(text: str) -> bool:
     _load_dotenv()
 
-    clean_text = " ".join(str(text).split())
-    api_key = os.getenv("ELEVENLABS_API_KEY")
-
-    if api_key:
-        print(f"🔑 ElevenLabs API Key carregada: {api_key[:6]}...{api_key[-4:]}")
-    else:
-        print("❌ ELEVENLABS_API_KEY não encontrada")
-
-    if not clean_text:
-        print("❌ Texto vazio para ElevenLabs")
-        return None
-
-    if not api_key:
-        return None
-
-    if not _env_enabled("ELEVENLABS_ENABLED", True):
-        print("⚠️ ElevenLabs desativado pelo .env")
-        return None
-
-    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
-    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
-    output_format = os.getenv("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128")
-
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-
-    try:
-        response = httpx.post(
-            url,
-            params={"output_format": output_format},
-            headers={
-                "xi-api-key": api_key,
-                "Accept": "audio/mpeg",
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": clean_text,
-                "model_id": model_id,
-                "language_code": os.getenv("ELEVENLABS_LANGUAGE_CODE", "pt"),
-                "voice_settings": {
-                    "stability": float(os.getenv("ELEVENLABS_STABILITY", "0.45")),
-                    "similarity_boost": float(os.getenv("ELEVENLABS_SIMILARITY", "0.85")),
-                    "style": float(os.getenv("ELEVENLABS_STYLE", "0.25")),
-                    "use_speaker_boost": _env_enabled("ELEVENLABS_SPEAKER_BOOST", True),
-                },
-            },
-            timeout=45,
-        )
-
-        if response.status_code != 200:
-            print("❌ Erro ElevenLabs:", response.status_code)
-            print("Resposta:", response.text)
-            return None
-
-        print("✅ ElevenLabs OK")
-        return response.content
-
-    except Exception as e:
-        print(f"❌ Erro ao chamar ElevenLabs: {e}")
-        return None
-
-
-def _speak_with_elevenlabs(text: str) -> bool:
-    audio_content = generate_elevenlabs_audio(text)
-
-    if audio_content is None:
+    if not _env_enabled("EDGE_TTS_ENABLED", True):
+        print("⚠️ Edge TTS desativado pelo .env")
         return False
 
-    audio_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    clean_text = " ".join(str(text).split())
+
+    if not clean_text:
+        return False
 
     try:
-        audio_file.write(audio_content)
-        audio_file.close()
+        audio_path = asyncio.run(generate_tts_audio(clean_text))
 
-        _play_audio_file(audio_file.name)
-        return True
+        if not audio_path or not Path(audio_path).exists():
+            print("❌ Edge TTS não gerou arquivo de áudio")
+            return False
 
-    finally:
+        _play_audio_file(str(audio_path))
+
         try:
-            Path(audio_file.name).unlink(missing_ok=True)
+            Path(audio_path).unlink(missing_ok=True)
         except OSError:
             pass
+
+        print("✅ Voz usada: Edge TTS")
+        return True
+
+    except Exception as e:
+        print(f"❌ Erro Edge TTS: {e}")
+        return False
 
 
 # =========================
@@ -194,7 +145,7 @@ def _get_coqui_tts():
 def _speak_with_coqui(text: str) -> bool:
     _load_dotenv()
 
-    if not _env_enabled("COQUI_ENABLED", True):
+    if not _env_enabled("COQUI_ENABLED", False):
         print("⚠️ Coqui desativado pelo .env")
         return False
 
@@ -274,10 +225,10 @@ def speak_text(text: str) -> None:
     def run():
         try:
             with _speech_lock:
-                if _speak_with_elevenlabs(clean_text):
+                if _speak_with_edge_tts(clean_text):
                     return
 
-                print("⚠️ ElevenLabs indisponível. Tentando Coqui TTS...")
+                print("⚠️ Edge TTS indisponível. Tentando Coqui TTS...")
                 if _speak_with_coqui(clean_text):
                     return
 

@@ -1,296 +1,423 @@
-import re
-from difflib import SequenceMatcher
+from datetime import datetime
 
+from sqlalchemy import or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.core.database import Memory
-from backend.core.obsidian_service import save_memory_to_obsidian
 
 
-MEMORY_KEYWORDS = [
-    "vamos usar",
-    "decidi",
-    "decidimos",
-    "ficou decidido",
-    "quero que",
-    "o helix deve",
-    "o helix precisa",
-    "prefiro",
-    "não quero",
-    "depois vamos",
-    "mais tarde",
-    "anote",
-    "lembre",
-    "salve",
-]
+QUESTION_STARTS = (
+    "o que",
+    "oque",
+    "qual",
+    "quais",
+    "como",
+    "quando",
+    "onde",
+    "por que",
+    "porque",
+    "será",
+    "sera",
+    "posso",
+    "pode",
+    "devo",
+    "vale",
+    "tem como",
+)
 
-
-STOP_WORDS = {
-    "que", "o", "a", "os", "as", "um", "uma", "de", "do", "da", "dos", "das",
-    "para", "como", "com", "no", "na", "nos", "nas", "foi", "ficou", "decidido",
-    "vamos", "usar", "usaremos", "projeto"
-}
+QUESTION_MARKERS = (
+    "?",
+    "me explica",
+    "explique",
+    "me diga",
+    "você acha",
+    "voce acha",
+    "o que acha",
+    "qual seria",
+    "como seria",
+    "como faço",
+    "como faco",
+)
 
 
 def normalize_text(text: str) -> str:
-    text = text.lower().strip()
+    return " ".join(str(text or "").strip().split())
 
-    replacements = {
-        "postgresql": "postgres",
-        "banco de dados": "banco",
-        "memória": "memoria",
-        "principal": "central",
-        "hilex": "helix",
+
+def lower_text(text: str) -> str:
+    return normalize_text(text).lower()
+
+
+def is_question(text: str) -> bool:
+    clean = lower_text(text)
+
+    if not clean:
+        return False
+
+    if clean.endswith("?"):
+        return True
+
+    if any(clean.startswith(start) for start in QUESTION_STARTS):
+        return True
+
+    if any(marker in clean for marker in QUESTION_MARKERS):
+        return True
+
+    return False
+
+
+def is_too_weak_memory(text: str) -> bool:
+    clean = lower_text(text)
+
+    if len(clean) < 12:
+        return True
+
+    weak_phrases = {
+        "sim",
+        "não",
+        "nao",
+        "ok",
+        "beleza",
+        "vamos",
+        "bora",
+        "entendi",
+        "certo",
+        "deu certo",
+        "funcionou",
+        "voltou a funcionar",
     }
 
-    for old, new in replacements.items():
-        text = text.replace(old, new)
+    return clean in weak_phrases
 
-    text = re.sub(r"[^a-z0-9áàâãéèêíóôõúç\s]", "", text)
-    text = re.sub(r"\s+", " ", text)
 
-    words = [
-        word for word in text.split()
-        if word not in STOP_WORDS and len(word) > 2
+def classify_memory(text: str) -> dict | None:
+    """
+    Decide se uma mensagem deve virar memória.
+
+    Retorna:
+    {
+        "owner_type": "user" | "project" | "system",
+        "category": "...",
+        "content": "...",
+        "importance": 1-5,
+        "source": "chat"
+    }
+
+    Ou None se não deve salvar.
+    """
+    original = normalize_text(text)
+    clean = lower_text(text)
+
+    if not original:
+        return None
+
+    if is_too_weak_memory(original):
+        return None
+
+    if is_question(original):
+        return None
+
+    system_rule_markers = [
+        "regra do helix",
+        "o helix deve sempre",
+        "helix deve sempre",
+        "o helix nunca deve",
+        "helix nunca deve",
+        "sempre pedir confirmação",
+        "pedir confirmação antes",
+        "não apague",
+        "nao apague",
+        "nunca apague",
+        "não delete",
+        "nao delete",
+        "nunca delete",
+        "não remova",
+        "nao remova",
+        "nunca remova",
     ]
 
-    return " ".join(words)
+    if any(marker in clean for marker in system_rule_markers):
+        content = original
+
+        if not clean.startswith("regra do helix"):
+            content = f"Regra do Helix: {original}"
+
+        return {
+            "owner_type": "system",
+            "category": "system_rule",
+            "content": content,
+            "importance": 5,
+            "source": "chat",
+        }
+
+    project_decision_markers = [
+        "decisão técnica",
+        "decisao tecnica",
+        "decidimos",
+        "decidi",
+        "vamos usar",
+        "vou usar",
+        "o helix usará",
+        "o helix usara",
+        "helix usará",
+        "helix usara",
+        "será usado",
+        "sera usado",
+        "será a memória principal",
+        "sera a memoria principal",
+        "continuará usando",
+        "continuara usando",
+        "backend do helix",
+        "frontend do helix",
+        "postgres",
+        "postgresql",
+        "fastapi",
+        "obsidian",
+    ]
+
+    strong_project_context = [
+        "helix",
+        "backend",
+        "frontend",
+        "postgres",
+        "postgresql",
+        "fastapi",
+        "obsidian",
+        "banco",
+        "memória",
+        "memoria",
+        "arquitetura",
+    ]
+
+    has_decision_marker = any(marker in clean for marker in project_decision_markers)
+    has_project_context = any(marker in clean for marker in strong_project_context)
+
+    if has_decision_marker and has_project_context:
+        content = original
+
+        if not clean.startswith("decisão técnica") and not clean.startswith("decisao tecnica"):
+            content = f"Decisão técnica: {original}"
+
+        return {
+            "owner_type": "project",
+            "category": "technical_decision",
+            "content": content,
+            "importance": 5,
+            "source": "chat",
+        }
 
 
-def refine_memory_content(text: str, category: str) -> str:
-    clean_text = text.strip()
-    lower_text = clean_text.lower()
+    user_preference_markers = [
+        "eu prefiro",
+        "prefiro",
+        "eu gosto",
+        "gosto de",
+        "não gosto",
+        "nao gosto",
+        "eu não quero",
+        "eu nao quero",
+        "não quero",
+        "nao quero",
+        "quero evitar",
+        "não pretendo",
+        "nao pretendo",
+        "não tenho pretensão",
+        "nao tenho pretensao",
+        "meu padrão",
+        "meu padrao",
+    ]
 
-    if category == "technical_decision":
-        clean_text = re.sub(
-            r"^(ficou decidido que|decidimos que|decidi que|vamos usar|usaremos|o helix usará|o helix vai usar)\s+",
-            "",
-            clean_text,
-            flags=re.IGNORECASE,
-        )
+    if any(marker in clean for marker in user_preference_markers):
+        content = original
 
-        if "postgres" in lower_text and "helix" in lower_text:
-            return "O Helix usará PostgreSQL como memória principal do projeto."
+        if not clean.startswith("preferência do usuário") and not clean.startswith("preferencia do usuario"):
+            content = f"Preferência do usuário: {original}"
 
-        if "obsidian" in lower_text and ("cérebro" in lower_text or "cerebro" in lower_text):
-            return "O Helix usará o Obsidian como cérebro organizado do projeto."
+        return {
+            "owner_type": "user",
+            "category": "user_preference",
+            "content": content,
+            "importance": 4,
+            "source": "chat",
+        }
 
-        if "frontend" in lower_text and "camadas" in lower_text:
-            return "O frontend do Helix será reconstruído futuramente em camadas."
+    future_goal_markers = [
+        "depois vamos",
+        "mais tarde vamos",
+        "futuramente",
+        "no futuro",
+        "quero implementar",
+        "vamos implementar",
+        "precisamos implementar",
+        "seria bom implementar",
+        "próximo passo",
+        "proximo passo",
+    ]
 
-        if "backend" in lower_text:
-            clean_text = clean_text.strip()
+    if any(marker in clean for marker in future_goal_markers) and has_project_context:
+        content = original
 
-            if clean_text:
-                clean_text = clean_text[0].upper() + clean_text[1:]
+        if not clean.startswith("objetivo do projeto"):
+            content = f"Objetivo do projeto: {original}"
 
-            return clean_text
-
-        clean_text = clean_text.strip()
-
-        if clean_text:
-            clean_text = clean_text[0].upper() + clean_text[1:]
-
-        return clean_text
-
-    if category == "system_rule":
-        clean_text = re.sub(
-            r"^(quero que|o helix deve|o helix precisa)\s+",
-            "",
-            clean_text,
-            flags=re.IGNORECASE,
-        )
-
-        clean_text = clean_text.strip()
-
-        if clean_text:
-            clean_text = clean_text[0].lower() + clean_text[1:]
-
-        return f"Regra do Helix: {clean_text}"
-
-    if category == "user_preference":
-        clean_text = clean_text.strip()
-
-        if clean_text:
-            clean_text = clean_text[0].lower() + clean_text[1:]
-
-        return f"Preferência do usuário: {clean_text}"
-
-    if category == "project":
-        clean_text = clean_text.strip()
-
-        if clean_text:
-            clean_text = clean_text[0].upper() + clean_text[1:]
-
-        return f"Informação do projeto Helix: {clean_text}"
-
-    return clean_text
-
-
-def similarity(a: str, b: str) -> float:
-    normalized_a = normalize_text(a)
-    normalized_b = normalize_text(b)
-
-    if not normalized_a or not normalized_b:
-        return 0
-
-    sequence_score = SequenceMatcher(None, normalized_a, normalized_b).ratio()
-
-    words_a = set(normalized_a.split())
-    words_b = set(normalized_b.split())
-
-    intersection = len(words_a & words_b)
-    union = len(words_a | words_b)
-
-    word_score = intersection / union if union else 0
-
-    return max(sequence_score, word_score)
-
-
-def find_similar_memory(
-    db: Session,
-    content: str,
-    threshold: float = 0.55,
-) -> Memory | None:
-    memories = db.query(Memory).all()
-
-    for memory in memories:
-        score = similarity(content, memory.content)
-
-        if score >= threshold:
-            return memory
+        return {
+            "owner_type": "project",
+            "category": "project_goal",
+            "content": content,
+            "importance": 4,
+            "source": "chat",
+        }
 
     return None
 
 
-def classify_memory(text: str) -> dict:
-    clean_text = text.strip()
-    lower_text = clean_text.lower()
+def normalize_for_similarity(text: str) -> set[str]:
+    clean = lower_text(text)
 
-    if not clean_text:
-        return {
-            "should_save": False,
-            "category": "ignore",
-            "owner_type": "temporary",
-            "importance": 0,
-            "content": "",
-        }
-
-    should_save = any(keyword in lower_text for keyword in MEMORY_KEYWORDS)
-
-    if not should_save:
-        return {
-            "should_save": False,
-            "category": "ignore",
-            "owner_type": "temporary",
-            "importance": 0,
-            "content": clean_text,
-        }
-
-    category = "general"
-    owner_type = "user"
-    importance = 3
-
-    if "helix" in lower_text:
-        category = "project"
-        owner_type = "project"
-        importance = 5
-
-    if "prefiro" in lower_text or "não quero" in lower_text:
-        category = "user_preference"
-        owner_type = "user"
-        importance = 4
-
-    if (
-        "vamos usar" in lower_text
-        or "decidi" in lower_text
-        or "decidimos" in lower_text
-        or "ficou decidido" in lower_text
-    ):
-        category = "technical_decision"
-        owner_type = "project"
-        importance = 5
-
-    if "o helix deve" in lower_text or "o helix precisa" in lower_text:
-        category = "system_rule"
-        owner_type = "system"
-        importance = 5
-
-    refined_content = refine_memory_content(clean_text, category)
-
-    return {
-        "should_save": True,
-        "category": category,
-        "owner_type": owner_type,
-        "importance": importance,
-        "content": refined_content,
+    replacements = {
+        "regra do helix": "",
+        "preferência do usuário": "",
+        "preferencia do usuario": "",
+        "decisão técnica": "",
+        "decisao tecnica": "",
+        "objetivo do projeto": "",
+        "sempre": "",
+        "antes de": "",
+        "qualquer": "",
+        "arquivos": "arquivo",
+        "ações": "acao",
+        "açoes": "acao",
+        "perigosas": "perigoso",
+        "confirmação": "confirmacao",
+        "apagar": "delete",
+        "apague": "delete",
+        "deletar": "delete",
+        "delete": "delete",
     }
 
-def should_sync_to_obsidian(
-        category: str,
-        owner_type: str,
-        importance: int,
-) -> bool:
-    if importance >= 5:
-        return True
-    
-    if category in ["Technical_decision", "system_rule"]:
-        return True
-    
-    if owner_type in ["project, system"] and importance >= 4:
-        return True
-    
-    return False
+    for old, new in replacements.items():
+        clean = clean.replace(old, new)
 
-def save_memory_if_relevant(
-    db: Session,
-    user_id: int,
-    text: str,
-) -> Memory | None:
-    classification = classify_memory(text)
+    stop_words = {
+        "o",
+        "a",
+        "os",
+        "as",
+        "um",
+        "uma",
+        "de",
+        "do",
+        "da",
+        "dos",
+        "das",
+        "em",
+        "no",
+        "na",
+        "nos",
+        "nas",
+        "para",
+        "por",
+        "com",
+        "e",
+        "ou",
+        "que",
+        "isso",
+        "esse",
+        "essa",
+        "meu",
+        "minha",
+        "seu",
+        "sua",
+    }
 
-    if not classification["should_save"]:
-        return None
+    words = {
+        word.strip(".,:;!?")
+        for word in clean.split()
+        if len(word.strip(".,:;!?")) >= 4
+        and word.strip(".,:;!?") not in stop_words
+    }
 
-    similar_memory = find_similar_memory(db, classification["content"])
+    return words
 
-    if similar_memory:
-        if classification["importance"] > similar_memory.importance:
-            similar_memory.importance = classification["importance"]
 
-        db.commit()
-        db.refresh(similar_memory)
+def similarity_score(text_a: str, text_b: str) -> float:
+    words_a = normalize_for_similarity(text_a)
+    words_b = normalize_for_similarity(text_b)
 
-        return similar_memory
+    if not words_a or not words_b:
+        return 0.0
 
-    memory = Memory(
-        user_id=user_id if classification["owner_type"] == "user" else None,
-        owner_type=classification["owner_type"],
-        category=classification["category"],
-        content=classification["content"],
-        importance=classification["importance"],
+    intersection = words_a.intersection(words_b)
+    union = words_a.union(words_b)
+
+    return len(intersection) / len(union)
+
+
+def memory_exists(db: Session, user_id: int, content: str) -> bool:
+    clean_content = normalize_text(content).lower()
+
+    existing = (
+        db.query(Memory)
+        .filter(
+            or_(
+                Memory.user_id == user_id,
+                Memory.owner_type.in_(["project", "system"]),
+            )
+        )
+        .all()
     )
 
-    db.add(memory)
-    db.commit()
-    db.refresh(memory)
+    for memory in existing:
+        existing_content = normalize_text(memory.content).lower()
 
-    if should_sync_to_obsidian(
-        category=memory.category,
-        owner_type=memory.owner_type,
-        importance=memory.importance,
-    ):
-        try:
-            save_memory_to_obsidian(
-                content=memory.content,
-                category=memory.category,
-                owner_type=memory.owner_type,
-                importance=memory.importance,
+        if existing_content == clean_content:
+            print(f"Memória igual já existe: {memory.content}")
+            return True
+
+        score = similarity_score(existing_content, clean_content)
+
+        if score >= 0.55:
+            print(
+                "Memória parecida já existe. "
+                f"Score={score:.2f} | existente={memory.content} | nova={content}"
             )
-        except Exception as exc:
-            print(f"Erro ao salvar memória no Obsidian: {exc}")
+            return True
 
-    return memory
+    return False
+
+
+def save_memory_if_relevant(db: Session, user_id: int, message: str) -> Memory | None:
+    memory_data = classify_memory(message)
+
+    if not memory_data:
+        return None
+
+    content = memory_data["content"]
+
+    if memory_exists(db, user_id, content):
+        return None
+
+    try:
+        memory = Memory(
+            user_id=user_id if memory_data["owner_type"] == "user" else None,
+            owner_type=memory_data["owner_type"],
+            category=memory_data["category"],
+            content=content,
+            importance=memory_data["importance"],
+            source=memory_data.get("source", "chat"),
+        )
+
+        db.add(memory)
+        db.commit()
+        db.refresh(memory)
+
+        return memory
+
+    except SQLAlchemyError as exc:
+        print(f"Erro ao salvar memória: {exc}")
+        db.rollback()
+        return None
 
 
 def load_relevant_memories(
@@ -298,15 +425,173 @@ def load_relevant_memories(
     user_id: int,
     limit: int = 8,
 ) -> list[str]:
-    memories = (
-        db.query(Memory)
-        .filter(
-            (Memory.user_id == user_id)
-            | (Memory.owner_type.in_(["project", "system"]))
+    try:
+        memories = (
+            db.query(Memory)
+            .filter(
+                or_(
+                    Memory.user_id == user_id,
+                    Memory.owner_type.in_(["project", "system"]),
+                )
+            )
+            .order_by(
+                Memory.importance.desc(),
+                Memory.created_at.desc(),
+            )
+            .limit(limit)
+            .all()
         )
-        .order_by(Memory.importance.desc(), Memory.created_at.desc())
-        .limit(limit)
-        .all()
-    )
 
-    return [memory.content for memory in memories]
+        now = datetime.utcnow()
+
+        result = []
+
+        for memory in memories:
+            memory.last_used_at = now
+            result.append(memory.content)
+
+        db.commit()
+
+        return result
+
+    except SQLAlchemyError as exc:
+        print(f"Erro ao carregar memórias relevantes: {exc}")
+        db.rollback()
+        return []
+
+
+def update_memory(
+    db: Session,
+    memory_id: int,
+    content: str | None = None,
+    owner_type: str | None = None,
+    category: str | None = None,
+    importance: int | None = None,
+    source: str | None = None,
+) -> Memory | None:
+    try:
+        memory = db.query(Memory).filter(Memory.id == memory_id).first()
+
+        if not memory:
+            return None
+
+        changed = False
+
+        if content is not None:
+            clean_content = content.strip()
+
+            if clean_content:
+                memory.content = clean_content
+                changed = True
+
+        if owner_type is not None:
+            clean_owner_type = owner_type.strip().lower()
+
+            if clean_owner_type in ["user", "project", "system"]:
+                memory.owner_type = clean_owner_type
+                memory.user_id = memory.user_id if clean_owner_type == "user" else None
+                changed = True
+
+        if category is not None:
+            clean_category = category.strip().lower()
+
+            if clean_category:
+                memory.category = clean_category
+                changed = True
+
+        if importance is not None:
+            if 1 <= importance <= 5:
+                memory.importance = importance
+                changed = True
+
+        if source is not None:
+            clean_source = source.strip().lower()
+
+            if clean_source:
+                memory.source = clean_source
+                changed = True
+
+        if changed:
+            memory.updated_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(memory)
+
+        return memory
+
+    except SQLAlchemyError as exc:
+        print(f"Erro ao atualizar memória: {exc}")
+        db.rollback()
+        return None
+
+
+def delete_memory(db: Session, memory_id: int) -> bool:
+    try:
+        memory = db.query(Memory).filter(Memory.id == memory_id).first()
+
+        if not memory:
+            return False
+
+        db.delete(memory)
+        db.commit()
+
+        return True
+
+    except SQLAlchemyError as exc:
+        print(f"Erro ao deletar memória: {exc}")
+        db.rollback()
+        return False
+
+
+def should_sync_to_obsidian(memory: Memory) -> bool:
+    """
+    Decide se uma memória deve ser sincronizada/salva no Obsidian.
+
+    Regras:
+    - Memórias importantes de sistema e projeto devem ir para o Obsidian.
+    - Preferências importantes do usuário também podem ir.
+    - Memórias fracas ou gerais não precisam ir.
+    """
+    if not memory:
+        return False
+
+    if memory.importance >= 5:
+        return True
+
+    if memory.owner_type in ["project", "system"]:
+        return True
+
+    if memory.category in [
+        "technical_decision",
+        "system_rule",
+        "project_goal",
+        "user_preference",
+    ] and memory.importance >= 4:
+        return True
+
+    return False
+
+
+def build_memory_markdown(memory: Memory) -> str:
+    """
+    Gera um Markdown simples para salvar uma memória no Obsidian.
+    """
+    created_at = memory.created_at.isoformat() if memory.created_at else "desconhecido"
+    updated_at = memory.updated_at.isoformat() if getattr(memory, "updated_at", None) else "desconhecido"
+
+    return f"""# Memória Helix #{memory.id}
+
+## Conteúdo
+
+{memory.content}
+
+## Metadados
+
+- ID: {memory.id}
+- Tipo: {memory.owner_type}
+- Categoria: {memory.category}
+- Importância: {memory.importance}
+- Fonte: {getattr(memory, "source", "chat")}
+- Criado em: {created_at}
+- Atualizado em: {updated_at}
+"""

@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 from backend.ai.factory import _load_dotenv
 from backend.core.database import get_db
 from backend.core.obsidian_service import log_error_to_obsidian
-from backend.core.voice_handler import generate_elevenlabs_audio, listen_and_transcribe
+from backend.core.voice_handler import listen_and_transcribe
+from backend.core.tts_edge import generate_tts_audio
 from backend.schemas.chat_schema import ChatRequest, TTSRequest
 from backend.services.chat_service import process_chat_logic
 
@@ -22,32 +23,31 @@ router = APIRouter()
 @router.post("/tts")
 async def tts(request: TTSRequest):
     try:
-        audio = await run_in_threadpool(generate_elevenlabs_audio, request.text)
+        print("🔊 /tts usando EDGE-TTS")
 
-        if not audio:
-            return {
-                "error": "ElevenLabs não configurado ou texto vazio.",
-            }
+        audio_path = await generate_tts_audio(request.text)
+        audio_bytes = Path(audio_path).read_bytes()
+
+        print(f"✅ Edge TTS gerou {len(audio_bytes)} bytes")
 
         return Response(
-            content=audio,
+            content=audio_bytes,
             media_type="audio/mpeg",
         )
 
     except Exception as e:
-        print("ERRO /tts:", e)
+        print("ERRO /tts EDGE-TTS:", e)
 
         try:
             log_error_to_obsidian(
                 error=str(e),
-                context="/tts",
+                context="/tts edge-tts",
                 user_message=request.text,
             )
         except Exception as log_exc:
             print(f"Erro ao registrar erro no Obsidian: {log_exc}")
 
         return {"error": str(e)}
-
 
 @router.post("/voice/transcribe")
 async def voice_transcribe(duration: int = 6):

@@ -5,36 +5,45 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.ai.factory import get_provider
+
 from backend.core.command_executor import (
     create_obsidian_markdown_note,
     execute_command,
     open_obsidian_note,
 )
+
 from backend.core.command_interpreter import interpret_command
+
 from backend.core.command_safety import (
     check_command_safety,
     build_confirmation_message,
 )
+
 from backend.core.database import (
     ChatHistory,
     get_or_create_user,
 )
+
 from backend.core.memory_service import (
     load_relevant_memories,
     save_memory_if_relevant,
 )
+
 from backend.core.obsidian_service import (
     log_command_to_obsidian,
     log_event_to_obsidian,
     log_conversation_to_obsidian,
     search_obsidian_notes,
 )
+
 from backend.core.local_command_parser import parse_local_command
 from backend.core.router_service import route_message
+
 from backend.services.dashboard_service import (
     is_dashboard_update_question,
     build_dashboard_update_response,
 )
+
 from backend.services.storage_service import (
     is_storage_cleanup_question,
     _build_storage_scan_context,
@@ -45,16 +54,20 @@ from backend.services.storage_service import (
     is_specific_folder_audit_question,
     build_specific_folder_audit_response,
 )
+
 from backend.services.pc_checkup_service import (
     is_automatic_checkup_question,
     build_automatic_checkup_response,
     _build_pc_context,
 )
+
 from backend.services.dev_environment_service import (
     generate_dev_environment_report,
-    save_dev_environment_report_to_obsidian
+    save_dev_environment_report_to_obsidian,
 )
+
 from backend.services.project_creator_service import create_gitignore
+
 
 SYSTEM_PROMPT = """
 Você é Helix, um assistente pessoal local criado pelo Marcos.
@@ -106,12 +119,41 @@ MAX_HISTORY = 10
 PENDING_COMMANDS = {}
 
 
+def _get_request_user_name(request) -> str:
+    user_name = getattr(request, "user_name", None)
+
+    if not user_name:
+        return "marcos"
+
+    clean_name = str(user_name).strip()
+
+    if not clean_name:
+        return "marcos"
+
+    return clean_name
+
+
+def _get_voice_mode(request) -> bool:
+    return bool(getattr(request, "voice_mode", False))
+
+
 def _history_to_messages(history_raw: list[ChatHistory]) -> list[dict[str, str]]:
     recent_history = []
 
     for h in reversed(history_raw):
-        recent_history.append({"role": "user", "content": h.user_message})
-        recent_history.append({"role": "assistant", "content": h.ai_response})
+        recent_history.append(
+            {
+                "role": "user",
+                "content": h.user_message,
+            }
+        )
+
+        recent_history.append(
+            {
+                "role": "assistant",
+                "content": h.ai_response,
+            }
+        )
 
     return recent_history
 
@@ -175,14 +217,41 @@ def extract_obsidian_search_terms(user_message: str) -> list[str]:
     text = user_message.lower().strip()
 
     stop_words = {
-        "o", "a", "os", "as", "um", "uma",
-        "de", "do", "da", "dos", "das",
-        "em", "no", "na", "nos", "nas",
-        "para", "por", "com", "sobre",
-        "que", "qual", "quais", "como",
-        "ja", "já", "foi", "foram",
-        "tem", "tenho", "temos",
-        "me", "te", "se", "isso",
+        "o",
+        "a",
+        "os",
+        "as",
+        "um",
+        "uma",
+        "de",
+        "do",
+        "da",
+        "dos",
+        "das",
+        "em",
+        "no",
+        "na",
+        "nos",
+        "nas",
+        "para",
+        "por",
+        "com",
+        "sobre",
+        "que",
+        "qual",
+        "quais",
+        "como",
+        "ja",
+        "já",
+        "foi",
+        "foram",
+        "tem",
+        "tenho",
+        "temos",
+        "me",
+        "te",
+        "se",
+        "isso",
         "projeto",
     }
 
@@ -279,27 +348,6 @@ def _build_obsidian_context(user_message: str, limit: int = 5) -> str:
         context += f"Trecho:\n{snippet}\n"
 
     return context
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def build_obsidian_context_debug(
@@ -459,6 +507,7 @@ def is_confirmation_message(message: str) -> bool:
 
     return text in confirmations
 
+
 def should_save_dev_environment_report(message: str) -> bool:
     text = message.lower().strip()
 
@@ -479,6 +528,7 @@ def should_save_dev_environment_report(message: str) -> bool:
     ]
 
     return any(keyword in text for keyword in keywords)
+
 
 def is_dev_environment_question(message: str) -> bool:
     text = message.lower().strip()
@@ -515,7 +565,6 @@ def is_dev_environment_question(message: str) -> bool:
 
 def build_dev_environment_response(save_to_obsidian: bool = False) -> str:
     report = generate_dev_environment_report()
-    save_to_obsidian = False
 
     vscode = report.get("vscode", {})
     projects = report.get("projects", {})
@@ -581,12 +630,11 @@ def build_dev_environment_response(save_to_obsidian: bool = False) -> str:
         response += "\n"
 
     response += "## Minha leitura inicial\n\n"
-
     response += (
-        "- Seu VS Code tem bastante coisa instalada. Com 76 extensões, vale fazer uma revisão.\n"
+        "- Seu VS Code tem bastante coisa instalada. Vale fazer uma revisão com calma.\n"
         "- Eu não recomendo apagar nada agora. Primeiro precisamos separar o que é essencial, útil, visual e realmente desnecessário.\n"
-        "- O Helix já conseguiu detectar projetos e tecnologias, então dá para evoluir isso para um relatório no Obsidian.\n"
-        "- Próximo passo recomendado: gerar uma lista detalhada das extensões para revisar e salvar no Obsidian.\n\n"
+        "- O Helix já consegue detectar projetos e tecnologias, então dá para evoluir isso para um relatório no Obsidian.\n"
+        "- Próximo passo recomendado: gerar uma lista detalhada das extensões para revisar.\n\n"
     )
 
     response += (
@@ -603,6 +651,7 @@ def build_dev_environment_response(save_to_obsidian: bool = False) -> str:
             response += "\n\nTentei salvar o relatório no Obsidian, mas algo falhou no caminho."
 
     return response
+
 
 def force_command_route(message: str) -> bool:
     text = message.lower().strip()
@@ -667,6 +716,7 @@ def fallback_command_interpreter(message: str) -> dict | None:
     for start in delete_note_starts:
         if text.startswith(start):
             target = message[len(start):].strip()
+
             if target:
                 return {
                     "action": "obsidian_delete",
@@ -703,6 +753,7 @@ def fallback_command_interpreter(message: str) -> dict | None:
     for start in close_starts:
         if text.startswith(start):
             target = message[len(start):].strip()
+
             if target:
                 return {
                     "action": "close",
@@ -711,12 +762,10 @@ def fallback_command_interpreter(message: str) -> dict | None:
 
     return None
 
+
 def is_create_gitignore_question(message: str) -> bool:
     text = message.lower().strip()
 
-    # Segurança: se o usuário está criando uma nota no Obsidian,
-    # não devemos interpretar palavras dentro do conteúdo da nota
-    # como comando real de criação de arquivo.
     obsidian_note_keywords = [
         "crie uma nota no obsidian",
         "criar uma nota no obsidian",
@@ -738,18 +787,15 @@ def is_create_gitignore_question(message: str) -> bool:
         "crie o gitignore",
         "criar o gitignore",
         "cria o gitignore",
-
         "crie .gitignore",
         "criar .gitignore",
         "cria .gitignore",
-
         "crie um .gitignore",
         "criar um .gitignore",
         "cria um .gitignore",
         "crie o .gitignore",
         "criar o .gitignore",
         "cria o .gitignore",
-
         "gere um gitignore",
         "gerar um gitignore",
         "gera um gitignore",
@@ -767,19 +813,16 @@ def is_create_gitignore_question(message: str) -> bool:
 def extract_project_path_from_gitignore_message(message: str) -> str | None:
     text = message.strip()
 
-    # Captura caminhos Windows tipo D:\Helix ou C:\Users\Marcos\Projeto
     windows_match = re.search(r"[a-zA-Z]:\\[^<>|?*\n\r]+", text)
 
     if windows_match:
         return windows_match.group(0).strip().strip('"').strip("'")
 
-    # Captura caminhos com barra normal tipo D:/Helix
     slash_match = re.search(r"[a-zA-Z]:/[^<>|?*\n\r]+", text)
 
     if slash_match:
         return slash_match.group(0).strip().strip('"').strip("'")
 
-    # Fallback: se mencionar projeto Helix, usa o caminho padrão
     lowered = text.lower()
 
     if "helix" in lowered:
@@ -871,7 +914,9 @@ def decide_message_route(user_message: str) -> dict:
         }
 
     route["local_command"] = None
+
     return route
+
 
 def is_create_obsidian_note_question(message: str) -> bool:
     text = message.lower().strip()
@@ -890,11 +935,6 @@ def is_create_obsidian_note_question(message: str) -> bool:
 
 
 def extract_obsidian_note_data(message: str) -> dict:
-    """
-    Extrai título e conteúdo de mensagens no formato:
-    crie uma nota no Obsidian chamada "Título" com o seguinte conteúdo: ...
-    """
-
     text = message.strip()
 
     title = None
@@ -912,7 +952,11 @@ def extract_obsidian_note_data(message: str) -> dict:
     ]
 
     for pattern in title_patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        match = re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
 
         if match:
             title = match.group(1).strip()
@@ -926,7 +970,11 @@ def extract_obsidian_note_data(message: str) -> dict:
     ]
 
     for pattern in content_patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        match = re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
 
         if match:
             content = match.group(1).strip()
@@ -964,6 +1012,7 @@ def build_create_obsidian_note_response(user_message: str) -> str:
 
     try:
         open_obsidian_note(note_path)
+
     except Exception as exc:
         print(f"Não consegui abrir a nota no Obsidian automaticamente: {exc}")
 
@@ -974,40 +1023,51 @@ def build_create_obsidian_note_response(user_message: str) -> str:
         "Conteúdo salvo em Markdown. Dessa vez sem o Dev Scanner querer bancar o xerife."
     )
 
+
 async def process_chat_logic(request, db: Session):
     user_message = request.message.strip()
-    user = get_or_create_user(db, request.user_name)
+    user_name = _get_request_user_name(request)
+    voice_mode = _get_voice_mode(request)
+
+    user = get_or_create_user(db, user_name)
 
     if not user_message:
-        return {"response": "Você não escreveu nada."}
-    
+        return {
+            "response": "Você não escreveu nada."
+        }
+
+    # 1. Criação explícita de nota no Obsidian
     if is_create_obsidian_note_question(user_message):
-            result = build_create_obsidian_note_response(user_message)
+        result = build_create_obsidian_note_response(user_message)
 
-            _save_history(db, user.id, user_message, result)
+        _save_history(db, user.id, user_message, result)
 
-            try:
-                log_event_to_obsidian(
-                    event="Nota criada no Obsidian pelo chat.",
-                    context="/chat",
-                    details="O usuário pediu criação explícita de nota no Obsidian.",
-                    user_name=request.user_name,
-                )
-            except Exception as exc:
-                print(f"Erro ao registrar criação de nota no Obsidian: {exc}")
+        try:
+            log_event_to_obsidian(
+                event="Nota criada no Obsidian pelo chat.",
+                context="/chat",
+                details="O usuário pediu criação explícita de nota no Obsidian.",
+                user_name=user_name,
+            )
 
-            return {"response": result}
+        except Exception as exc:
+            print(f"Erro ao registrar criação de nota no Obsidian: {exc}")
 
-    # 1. Confirmação de comando pendente
-    # Mantemos isso no topo porque "confirmar" precisa executar algo pendente,
-    # não cair na IA ou em outro detector.
+        return {
+            "response": result
+        }
+
+    # 2. Confirmação de comando pendente
     if is_confirmation_message(user_message):
         pending = PENDING_COMMANDS.get(user.id)
 
         if not pending:
             result = "Não há nenhum comando pendente para confirmar."
             _save_history(db, user.id, user_message, result)
-            return {"response": result}
+
+            return {
+                "response": result
+            }
 
         action = pending["action"]
         target = pending["target"]
@@ -1026,31 +1086,34 @@ async def process_chat_logic(request, db: Session):
                 action=action,
                 target=target,
                 result=result,
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar comando confirmado no Obsidian: {exc}")
 
         _save_history(db, user.id, user_message, result)
-        return {"response": result}
 
-    # 2. Roteamento principal de comando
-    # Isso vem antes dos atalhos especiais para impedir que textos longos de nota
-    # sejam confundidos com Dev Scanner ou .gitignore só porque contêm essas palavras.
+        return {
+            "response": result
+        }
+
+    # 3. Roteamento principal
     route = decide_message_route(user_message)
 
     print("ROTA DA MENSAGEM:", route)
 
-    if route["type"] == "memory":
+    if route.get("type") == "memory":
         save_memory_if_relevant(db, user.id, user_message)
 
     command_data = None
 
-    if route["type"] == "command":
+    if route.get("type") == "command":
         local_command = route.get("local_command")
 
         if local_command:
             command_data = local_command
+
         else:
             command_data = await interpret_command(user_message)
 
@@ -1062,7 +1125,7 @@ async def process_chat_logic(request, db: Session):
         print("COMANDO INTERPRETADO:", command_data)
 
     if (
-        route["type"] == "command"
+        route.get("type") == "command"
         and command_data
         and command_data.get("action")
         and command_data.get("target")
@@ -1079,13 +1142,17 @@ async def process_chat_logic(request, db: Session):
                     action=action,
                     target=target,
                     result=result,
-                    user_name=request.user_name,
+                    user_name=user_name,
                 )
+
             except Exception as exc:
                 print(f"Erro ao registrar comando no Obsidian: {exc}")
 
             _save_history(db, user.id, user_message, result)
-            return {"response": result}
+
+            return {
+                "response": result
+            }
 
         safety = check_command_safety(action, target)
 
@@ -1108,18 +1175,25 @@ async def process_chat_logic(request, db: Session):
                     action=action,
                     target=target,
                     result="Comando aguardando confirmação.",
-                    user_name=request.user_name,
+                    user_name=user_name,
                 )
+
             except Exception as exc:
                 print(f"Erro ao registrar comando pendente no Obsidian: {exc}")
 
             _save_history(db, user.id, user_message, result)
-            return {"response": result}
+
+            return {
+                "response": result
+            }
 
         if not safety["allowed"]:
             result = f"Comando bloqueado por segurança: {safety['reason']}"
             _save_history(db, user.id, user_message, result)
-            return {"response": result}
+
+            return {
+                "response": result
+            }
 
         result = execute_command(action, target)
 
@@ -1130,18 +1204,21 @@ async def process_chat_logic(request, db: Session):
                     action=action,
                     target=target,
                     result=result,
-                    user_name=request.user_name,
+                    user_name=user_name,
                 )
+
             except Exception as exc:
                 print(f"Erro ao registrar comando no Obsidian: {exc}")
 
             _save_history(db, user.id, user_message, result)
-            return {"response": result}
+
+            return {
+                "response": result
+            }
 
         print("⚠️ Comando detectado, mas falhou. Usando IA como fallback...")
 
-    # 3. Project Creator: criar .gitignore
-    # Só chega aqui se a mensagem NÃO foi tratada como comando explícito do Obsidian.
+    # 4. Criar .gitignore
     if is_create_gitignore_question(user_message):
         result = build_create_gitignore_response(user_message)
 
@@ -1152,14 +1229,17 @@ async def process_chat_logic(request, db: Session):
                 event="Gitignore solicitado pelo chat.",
                 context="/chat",
                 details="O usuário pediu criação de .gitignore em um projeto.",
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar criação de gitignore no Obsidian: {exc}")
 
-        return {"response": result}
+        return {
+            "response": result
+        }
 
-    # 4. Dev Scanner
+    # 5. Dev Scanner
     if is_dev_environment_question(user_message):
         save_to_obsidian = should_save_dev_environment_report(user_message)
         result = build_dev_environment_response(save_to_obsidian=save_to_obsidian)
@@ -1171,14 +1251,17 @@ async def process_chat_logic(request, db: Session):
                 event="Ambiente de desenvolvimento analisado pelo chat.",
                 context="/chat",
                 details="O usuário pediu análise do VS Code, extensões, ferramentas ou projetos.",
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar análise do ambiente dev no Obsidian: {exc}")
 
-        return {"response": result}
+        return {
+            "response": result
+        }
 
-    # 5. Dashboard
+    # 6. Dashboard
     if is_dashboard_update_question(user_message):
         result = build_dashboard_update_response()
 
@@ -1189,14 +1272,17 @@ async def process_chat_logic(request, db: Session):
                 event="Dashboard Helix atualizado por comando natural.",
                 context="/chat",
                 details="O usuário pediu atualização do dashboard pelo chat.",
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar atualização natural do dashboard no Obsidian: {exc}")
 
-        return {"response": result}
+        return {
+            "response": result
+        }
 
-    # 6. Auditoria de pasta específica
+    # 7. Auditoria de pasta específica
     if is_specific_folder_audit_question(user_message):
         folder_path = extract_folder_path_from_message(user_message)
 
@@ -1206,6 +1292,7 @@ async def process_chat_logic(request, db: Session):
                 "Exemplo:\n"
                 "`analise a pasta C:\\ProgramData\\BlueStacks_nxt`"
             )
+
         else:
             result = build_specific_folder_audit_response(folder_path)
 
@@ -1216,14 +1303,17 @@ async def process_chat_logic(request, db: Session):
                 event="Auditoria de pasta específica consultada pelo chat.",
                 context="/chat",
                 details=f"Pasta solicitada: {folder_path}",
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar auditoria de pasta no Obsidian: {exc}")
 
-        return {"response": result}
+        return {
+            "response": result
+        }
 
-    # 7. Auditoria completa de armazenamento
+    # 8. Auditoria completa de armazenamento
     if is_full_storage_audit_question(user_message):
         result = build_full_storage_audit_response()
 
@@ -1234,14 +1324,17 @@ async def process_chat_logic(request, db: Session):
                 event="Auditoria completa de armazenamento consultada pelo chat.",
                 context="/chat",
                 details="O usuário pediu uma avaliação completa do armazenamento do C:.",
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar auditoria completa no Obsidian: {exc}")
 
-        return {"response": result}
+        return {
+            "response": result
+        }
 
-    # 8. Scanner seguro de armazenamento
+    # 9. Scanner seguro de armazenamento
     if is_storage_cleanup_question(user_message):
         result = build_storage_scan_response()
 
@@ -1252,14 +1345,17 @@ async def process_chat_logic(request, db: Session):
                 event="Scanner de armazenamento consultado pelo chat.",
                 context="/chat",
                 details="O usuário pediu ajuda para liberar espaço no disco C:.",
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar scanner de armazenamento no Obsidian: {exc}")
 
-        return {"response": result}
+        return {
+            "response": result
+        }
 
-    # 9. Check-up automático do PC
+    # 10. Check-up automático do PC
     if is_automatic_checkup_question(user_message):
         result = build_automatic_checkup_response()
 
@@ -1270,14 +1366,17 @@ async def process_chat_logic(request, db: Session):
                 event="Check-up automático do PC consultado pelo chat.",
                 context="/chat",
                 details="O usuário pediu uma avaliação automática do estado atual do PC.",
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
         except Exception as exc:
             print(f"Erro ao registrar check-up automático no Obsidian: {exc}")
 
-        return {"response": result}
+        return {
+            "response": result
+        }
 
-    # 10. Fallback para IA normal
+    # 11. Fallback para IA normal
     recent_history = _load_recent_history(db, user.id)
 
     memories = load_relevant_memories(db, user.id)
@@ -1295,7 +1394,7 @@ async def process_chat_logic(request, db: Session):
         + storage_scan_context
     )
 
-    if request.voice_mode:
+    if voice_mode:
         system_content += (
             "\nModo voz ativo: a mensagem do usuário foi transcrita do microfone. "
             "Responda como se estivesse ouvindo a pessoa pelo Helix. "
@@ -1303,9 +1402,15 @@ async def process_chat_logic(request, db: Session):
         )
 
     messages = [
-        {"role": "system", "content": system_content},
+        {
+            "role": "system",
+            "content": system_content,
+        },
         *recent_history,
-        {"role": "user", "content": user_message},
+        {
+            "role": "user",
+            "content": user_message,
+        },
     ]
 
     provider = get_provider()
@@ -1321,16 +1426,19 @@ async def process_chat_logic(request, db: Session):
     _save_history(db, user.id, user_message, ai_response)
 
     try:
-        if route["type"] == "chat" and should_log_conversation(
+        if route.get("type") == "chat" and should_log_conversation(
             user_message,
             ai_response,
         ):
             log_conversation_to_obsidian(
                 user_message=user_message,
                 ai_response=ai_response,
-                user_name=request.user_name,
+                user_name=user_name,
             )
+
     except Exception as exc:
         print(f"Erro ao registrar conversa no Obsidian: {exc}")
 
-    return {"response": ai_response}
+    return {
+        "response": ai_response
+    }
