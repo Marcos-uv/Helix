@@ -1,4 +1,4 @@
-def route_message(text: str) -> dict:
+def route_message(text: str) -> str:
     text_clean = text.strip()
     text_lower = text_clean.lower()
 
@@ -6,34 +6,332 @@ def route_message(text: str) -> dict:
         return {
             "type": "empty",
             "confidence": 1.0,
-            "reason": "Mensagem vazia.",
+            "message": "Mensagem vazia."
         }
-
+    
+    helix_prefixes = [ 
+        "helix, ",
+        "helix ",
+        "ei helix, ",
+        "ei helix ",
+        "ok helix, ",
+        "ok helix ",
+        "olá helix, ",
+        "oi helix, ",
+        "olá helix ",
+        "oi helix "
+        ]
+    
+    for prefix in helix_prefixes:
+        if text_lower.startswith(prefix):
+            text_lower = text_lower.replace(prefix, "", 1).strip()
+            break
+    
     command_starts = [
         "abra ",
         "abrir ",
+        "abre ",
+        "abri ",
         "execute ",
         "executar ",
-        "crie uma nota",
-        "criar nota",
-        "adicione em",
-        "adicionar em",
-        "salve no obsidian",
-        "resuma no obsidian",
-        "crie no obsidian",
-    ]
-
+        "executa ",
+        "rode ",
+        "rodar ",
+        "roda ",
+        "inicie ",
+        "iniciar ",
+        "inicia ",
+        "fecha ",
+        "feche ",
+        "fechar ",
+        "encerra ",
+        "encerrar ",
+        "pesquise ",
+        "pesquisar ",
+        "pesquisa ",
+        "procure ",
+        "procurar ",
+        "procura ",
+        "verifique ",
+        "verificar ",
+        "verifica ",
+        "cheque ",
+        "checar ",
+        "checa ",
+        "mostre ",
+        "mostrar ",
+        "mostra ",
+        "exiba ",
+        "exibir ",
+        "exibe ",
+        "busque ",
+        "buscar ",
+        "busca ",
+        "encontre ",
+        "encontrar ",
+        "encontra ",
+        "localize ",
+        "localizar ",
+        "localiza ",
+        "encontre ",
+        "encontrar ",
+        "encontra ",
+        "procure ",
+        "procurar ",
+        "procura ",
+        "verifique ",
+        "verificar ",
+        "verifica ",
+        "cheque ",
+        "checar ",
+        "checa ",
+        ]
+    
+    command_keywords =[
+        "abre o",
+        "abrir o",
+        "abre a",
+        "abrir a",
+        "fecha o",
+        "fechar o",
+        "fecha a",
+        "fechar a",
+        "abre meu",
+        "abrir meu",
+        "abre minha",
+        "abrir minha",
+        "pesquisa por",
+        "procura por",
+        "verifica meu pc",
+        "checa meu pc",
+        "como está meu pc",
+        "como esta meu pc",
+        "mostra meu pc",
+        "mostre meu pc",
+        "exibe meu pc",
+        "exibir meu pc",
+        "busca por",
+        "encontre por",
+        "localize por",
+        "procura por",
+        "verifique por",
+        "cheque por",
+        "mostre por",
+        "exiba por",
+        "busque por",
+        "encontre por",
+        "localize por",
+        "procure por",
+        "verifique por",
+        "cheque por",
+        "mostre por",
+        "exiba por",
+        "busque por",
+        "encontre por",
+        "localize por",
+        "procure por"
+        ]
+    
+    complex_keywords = [
+        "e depois",
+        "depois",
+        "também",
+        "tambem",
+        "junto",
+        "ao mesmo tempo",
+        "em seguida",
+        "prepara meu ambiente",
+        "preparar meu ambiente",
+        "modo programação",
+        "modo programacao",
+        "quero programar",
+        "bora programar",
+        "mexer no helix",
+        "trabalhar no helix",
+        "prepara o helix",
+        "prepara o ambiente do helix",
+        "abre tudo",
+        "organiza meu ambiente",
+        "organizar meu ambiente",
+        "fecha distrações",
+        "fecha distracoes",
+        "prepara tudo",
+        "organiza tudo",
+        "fecha tudo",
+        "organiza tudo",
+        "deixa tudo pronto",
+        "deixa tudo organizado",
+        "deixa tudo preparado",
+        "deixa tudo arrumado",
+        "deixa tudo em ordem",
+        "deixa tudo em ordem para mim",
+        "deixa tudo em ordem para mim, helix",
+        "pesquisa tudo",
+        "procura tudo",
+        "verifica tudo",
+        "checa tudo",
+        "mostra tudo",
+        "exibe tudo",
+        "busca tudo",
+        "filtra por",
+        "filtra tudo por",
+        "filtra por",
+        "filtra tudo por",
+        "mostra tudo por",
+        "exibe tudo por",
+        "busca por",
+        "encontre por",
+        "localize por",
+        "procure por",
+        "verifique por",
+        "cheque por",
+        ]
+    
+    dangerous_keywords = [
+        "apaga",
+        "apagar",
+        "delete",
+        "deleta",
+        "deletar",
+        "remove",
+        "remover",
+        "limpa",
+        "limpar",
+        "mover arquivo",
+        "mova arquivo",
+        "formatar",
+        "desinstalar",
+        "desinstala",
+        "mata processo",
+        "kill",
+        "taskkill",
+        "rodar comando",
+        "executar comando",
+        "terminal",
+        "powershell",
+        "cmd",
+        "prompt de comando",
+        "shell",
+        "linha de comando",
+        "console",
+        "terminal do windows",
+        "encerrar processo",
+        "encerrar tarefa",
+        "finalizar processo",
+        "finalizar tarefa",
+        ]
+    
     memory_keywords = [
         "vamos usar",
         "decidi",
         "decidimos",
         "ficou decidido",
         "quero que o helix lembre",
+        "quero que você lembre",
+        "quero que voce lembre",
+        "lembre que",
+        "lembra que",
+        "salva isso",
+        "guarda isso",
+        "memoriza isso",
+        "não esquece",
+        "nao esquece",
         "o helix deve",
         "o helix precisa",
         "prefiro",
         "não quero",
-    ]
+        "nao quero",
+        "evite",
+        "evita",
+        "não faça",
+        "nao faça",
+        "não faça isso",
+        "nao faça isso",
+        "não faça isso, helix",
+        "nao faça isso, helix",
+        "não faça isso helix",
+        "nao faça isso helix",
+        "lembre disso",
+        "lembra disso",
+        "guarde isso",
+        "salve isso",
+        "memorize isso",
+        "não esqueça disso",
+        "nao esqueça disso",
+        "não esquece disso",
+        "nao esquece disso",
+        "o helix deve lembrar",
+        "o helix precisa lembrar",
+        "o helix deve guardar",
+        "o helix precisa guardar",]
+    
+    obsidian_keywords = [
+        "crie uma nota",
+        "criar nota",
+        "cria uma nota",
+        "adicione em",
+        "adicionar em",
+        "salve no obsidian",
+        "salva no obsidian",
+        "resuma no obsidian",
+        "resume no obsidian",
+        "crie no obsidian",
+        "cria no obsidian",
+        "abra no obsidian",
+        "abre no obsidian",
+        "adicione no obsidian",
+        "adicionar no obsidian",
+        "salve no obsidian",
+        "salva no obsidian",
+        "resuma no obsidian",
+        "resume no obsidian",
+        "crie no obsidian",
+        "cria no obsidian",
+        "abra no obsidian",
+        "abre no obsidian",
+        "adicione em uma nota",
+        "adicionar em uma nota",
+        "salve em uma nota",
+        "salva em uma nota",
+        "resuma em uma nota",
+        "resume em uma nota",
+        "crie em uma nota",
+        "cria em uma nota",
+        "abra em uma nota",
+        "abre em uma nota",
+        "feche em uma nota",
+        "feche no obsidian",
+        "fecha em uma nota",
+        ]
+
+    
+    if any(keywords in text_lower for keywords in dangerous_keywords):
+        return {
+            "type": "dangecommand",
+            "confidence": 0.9,
+            "message": "Mensagem parece conter ação sensível ou perigosa."
+        }
+    
+    if any(keyword in text_lower for keyword in memory_keywords):
+        return {
+            "type": "memory",
+            "confidence": 0.85,
+            "message": "Mensagem parece conter instrução de memória ou preferência."
+        }
+    
+    if any(keyword in text_lower for keyword in complex_keywords):
+        return {
+            "type": "complex_command",
+            "confidence": 0.85,
+            "message": "Mensagem parece conter múltiplas ações ou instruções complexas."
+        }
+    
+    if any(keyword in text_lower for keyword in obsidian_keywords):
+        return {
+            "type": "command",
+            "confidence": 0.9,
+            "reason": "Mensagem parece ser comando relacionado ao Obsidian.",
+        }
 
     if any(text_lower.startswith(cmd) for cmd in command_starts):
         return {
@@ -42,11 +340,11 @@ def route_message(text: str) -> dict:
             "reason": "Mensagem começa como comando explícito.",
         }
 
-    if any(keyword in text_lower for keyword in memory_keywords):
+    if any(keyword in text_lower for keyword in command_keywords):
         return {
-            "type": "memory",
-            "confidence": 0.85,
-            "reason": "Mensagem parece conter decisão, preferência ou regra.",
+            "type": "command",
+            "confidence": 0.8,
+            "reason": "Mensagem contém intenção de comando.",
         }
 
     return {

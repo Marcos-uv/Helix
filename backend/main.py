@@ -25,6 +25,8 @@ from backend.core.tts_edge import generate_tts_audio
 from backend.schemas.chat_schema import ChatRequest
 from backend.services.chat_service import process_chat_logic
 from pydantic import BaseModel
+from backend.api import app_registry_routes
+from backend.models.known_app import KnownApp
 
 
 app = FastAPI()
@@ -110,6 +112,7 @@ app.include_router(memory_router)
 app.include_router(voice_router)
 app.include_router(dev_environment_router)
 
+app.include_router(app_registry_routes.router)
 
 @app.post("/chat")
 async def chat(request: ChatRequest, db: Session = Depends(get_db)):

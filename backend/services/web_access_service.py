@@ -1,0 +1,705 @@
+from __future__ import annotations
+
+import re
+import socket
+from dataclasses import dataclass
+from html.parser import HTMLParser
+from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+
+# ============================================================
+# Helix Web Access Service - Fase 1.2
+# Acesso básico, somente leitura, com filtro melhor contra menu/sidebar.
+#
+# Regras:
+# - Lê páginas permitidas.
+# - Não baixa arquivos.
+# - Não instala nada.
+# - Não executa nada.
+# - Não envia formulário.
+# - Não usa login/senha/token.
+# ============================================================
+
+REQUEST_TIMEOUT_SECONDS = 8
+MAX_PAGE_BYTES = 700_000
+MAX_EXTRACTED_CHARS = 14_000
+
+ALLOWED_DOMAINS = {
+    # Docs / programação
+    "docs.python.org",
+    "fastapi.tiangolo.com",
+    "docs.sqlalchemy.org",
+    "www.postgresql.org",
+    "postgresql.org",
+    "pydantic.dev",
+    "developer.mozilla.org",
+    "react.dev",
+    "vite.dev",
+    "tailwindcss.com",
+    "docs.github.com",
+    "github.com",
+    "code.visualstudio.com",
+    "learn.microsoft.com",
+
+    # IA / pesquisa
+    "openai.com",
+    "platform.openai.com",
+    "ollama.com",
+    "huggingface.co",
+    "arxiv.org",
+    "paperswithcode.com",
+    "pytorch.org",
+    "www.tensorflow.org",
+    "tensorflow.org",
+    "scikit-learn.org",
+
+    # Obsidian / produtividade
+    "help.obsidian.md",
+
+    # Consulta geral segura
+    "wikipedia.org",
+    "pt.wikipedia.org",
+    "en.wikipedia.org",
+}
+
+BLOCKED_EXTENSIONS = {
+    ".exe", ".msi", ".bat", ".cmd", ".ps1", ".sh", ".scr",
+    ".zip", ".rar", ".7z", ".tar", ".gz",
+    ".dll", ".iso", ".apk",
+    ".py", ".js", ".jar",
+}
+
+SENSITIVE_KEYWORDS = {
+    "login",
+    "signin",
+    "signup",
+    "checkout",
+    "payment",
+    "token",
+    "apikey",
+    "api-key",
+    "password",
+    "senha",
+}
+
+NOISY_PHRASES = [
+    "skip to content",
+    "join the fastapi cloud waiting list",
+    "follow @",
+    "follow fastapi",
+    "newsletter",
+    "sponsor",
+    "sponsors",
+    "gold sponsors",
+    "silver sponsors",
+    "keystone sponsor",
+    "search",
+    "cookie",
+    "privacy policy",
+    "terms of service",
+    "edit this page",
+    "previous",
+    "next",
+    "on this page",
+    "source code",
+]
+
+MENU_KEYWORDS = [
+    "features",
+    "learn",
+    "reference",
+    "resources",
+    "about",
+    "release notes",
+    "path parameters",
+    "query parameters",
+    "request body",
+    "response model",
+    "middleware",
+    "security",
+    "deployment",
+    "testing",
+    "websockets",
+    "openapi",
+]
+
+
+@dataclass
+class WebFetchResult:
+    ok: bool
+    url: str
+    title: str | None = None
+    text: str | None = None
+    headings: list[str] | None = None
+    links: list[str] | None = None
+    reason: str | None = None
+    domain: str | None = None
+    risk: str = "low"
+    bytes_read: int = 0
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self._skip_depth = 0
+        self._skip_tags = {"script", "style", "noscript", "svg", "canvas"}
+
+        self.title: str | None = None
+        self._in_title = False
+
+        self._current_heading: str | None = None
+        self._heading_parts: list[str] = []
+        self.headings: list[str] = []
+
+        self._current_block_tag: str | None = None
+        self._current_block_parts: list[str] = []
+        self.blocks: list[str] = []
+
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+
+        if tag in self._skip_tags:
+            self._skip_depth += 1
+
+        if tag == "title":
+            self._in_title = True
+
+        if tag in {"h1", "h2", "h3"}:
+            self._current_heading = tag
+            self._heading_parts = []
+
+        # Captura blocos reais. Evita juntar a página inteira em uma frase só.
+        if tag in {"p", "li", "h1", "h2", "h3", "h4", "blockquote"}:
+            self._flush_block()
+            self._current_block_tag = tag
+            self._current_block_parts = []
+
+        if tag == "a":
+            attrs_dict = dict(attrs)
+            href = attrs_dict.get("href")
+            if href and href.startswith(("http://", "https://")):
+                self.links.append(href)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+
+        if tag in self._skip_tags and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+        if tag == "title":
+            self._in_title = False
+
+        if tag in {"h1", "h2", "h3"} and self._current_heading:
+            heading = " ".join(" ".join(self._heading_parts).split()).strip()
+            heading = clean_heading(heading)
+            if heading and heading not in self.headings and not is_noise_line(heading):
+                self.headings.append(heading)
+            self._current_heading = None
+            self._heading_parts = []
+
+        if self._current_block_tag == tag:
+            self._flush_block()
+
+    def handle_data(self, data: str) -> None:
+        clean = " ".join(data.split())
+        if not clean:
+            return
+
+        if self._in_title:
+            self.title = clean
+            return
+
+        if self._skip_depth > 0:
+            return
+
+        if self._current_heading:
+            self._heading_parts.append(clean)
+
+        if self._current_block_tag:
+            self._current_block_parts.append(clean)
+
+    def _flush_block(self) -> None:
+        if not self._current_block_parts:
+            self._current_block_tag = None
+            return
+
+        block = " ".join(" ".join(self._current_block_parts).split()).strip()
+        block = clean_block(block)
+
+        if is_useful_block(block):
+            self.blocks.append(block)
+
+        self._current_block_tag = None
+        self._current_block_parts = []
+
+    def get_text(self) -> str:
+        self._flush_block()
+        blocks = dedupe_blocks(self.blocks)
+        return "\n".join(blocks)[:MAX_EXTRACTED_CHARS]
+
+
+def clean_heading(text: str) -> str:
+    text = text.replace("¶", "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def clean_block(text: str) -> str:
+    text = text.replace("¶", "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def is_noise_line(line: str) -> bool:
+    lowered = line.lower().strip()
+
+    if not lowered:
+        return True
+
+    if any(phrase in lowered for phrase in NOISY_PHRASES):
+        return True
+
+    # Linhas com troca de idiomas/navbar.
+    language_hits = sum(
+        token in lowered
+        for token in [
+            "english", "deutsch", "español", "français", "日本語",
+            "한국어", "português", "русский", "中文",
+        ]
+    )
+    if language_hits >= 2:
+        return True
+
+    return False
+
+
+def looks_like_menu_dump(line: str) -> bool:
+    lowered = line.lower()
+
+    menu_hits = sum(1 for keyword in MENU_KEYWORDS if keyword in lowered)
+
+    # Menu gigante da documentação costuma ter muitos termos e quase nenhuma pontuação normal.
+    if menu_hits >= 6 and len(line) > 350:
+        return True
+
+    if len(line) > 900:
+        return True
+
+    # Muitos "títulos" separados sem frase natural.
+    words = line.split()
+    if len(words) > 90 and line.count(".") <= 2:
+        return True
+
+    return False
+
+
+def is_useful_block(block: str) -> bool:
+    if not block:
+        return False
+
+    if is_noise_line(block):
+        return False
+
+    if looks_like_menu_dump(block):
+        return False
+
+    # Muito curto geralmente é menu ou título solto. Headings são tratados separado.
+    if len(block) < 35:
+        return False
+
+    # Linhas úteis costumam ter algum sinal de frase real.
+    has_sentence_signal = any(mark in block for mark in [".", ":", ";", "—", "-"])
+    has_technical_signal = any(
+        word in block.lower()
+        for word in [
+            "fastapi", "python", "framework", "api", "documentation",
+            "install", "example", "openapi", "pydantic", "database",
+            "async", "security", "deployment", "model", "dataset",
+            "postgresql", "sqlalchemy", "obsidian", "github",
+        ]
+    )
+
+    if not has_sentence_signal and not has_technical_signal:
+        return False
+
+    return True
+
+
+def dedupe_blocks(blocks: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for block in blocks:
+        normalized = re.sub(r"\W+", " ", block.lower()).strip()
+        if normalized in seen:
+            continue
+
+        # Evita blocos muito parecidos contendo blocos já salvos.
+        if any(normalized and normalized in old for old in seen):
+            continue
+
+        seen.add(normalized)
+        result.append(block)
+
+    return result
+
+
+def normalize_domain(domain: str) -> str:
+    domain = domain.lower().strip()
+    if domain.startswith("www."):
+        return domain[4:]
+    return domain
+
+
+def get_domain(url: str) -> str | None:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        if not parsed.netloc:
+            return None
+        return normalize_domain(parsed.netloc)
+    except Exception:
+        return None
+
+
+def is_domain_allowed(url: str) -> bool:
+    domain = get_domain(url)
+    if not domain:
+        return False
+
+    allowed_normalized = {normalize_domain(item) for item in ALLOWED_DOMAINS}
+
+    if domain in allowed_normalized:
+        return True
+
+    for allowed in allowed_normalized:
+        if domain.endswith("." + allowed):
+            return True
+
+    return False
+
+
+def classify_url_risk(url: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    lowered_url = url.lower()
+
+    extension_risk = any(path.endswith(ext) for ext in BLOCKED_EXTENSIONS)
+    sensitive_risk = any(keyword in lowered_url for keyword in SENSITIVE_KEYWORDS)
+
+    if extension_risk:
+        return {
+            "risk": "blocked",
+            "reason": "A URL parece apontar para download/arquivo executável ou compactado.",
+        }
+
+    if sensitive_risk:
+        return {
+            "risk": "medium",
+            "reason": "A URL parece envolver login, senha, token, pagamento ou área sensível.",
+        }
+
+    if not is_domain_allowed(url):
+        return {
+            "risk": "blocked",
+            "reason": "Domínio não está na lista de leitura permitida do Helix.",
+        }
+
+    return {
+        "risk": "low",
+        "reason": "URL permitida para leitura básica.",
+    }
+
+
+def extract_url_from_message(message: str) -> str | None:
+    match = re.search(r"https?://[^\s)>\]]+", message)
+    if match:
+        return match.group(0).strip().rstrip(".,;")
+    return None
+
+
+def fetch_page_text(url: str) -> WebFetchResult:
+    risk_info = classify_url_risk(url)
+    domain = get_domain(url)
+
+    if risk_info["risk"] == "blocked":
+        return WebFetchResult(
+            ok=False,
+            url=url,
+            domain=domain,
+            risk="blocked",
+            reason=risk_info["reason"],
+        )
+
+    try:
+        socket.setdefaulttimeout(REQUEST_TIMEOUT_SECONDS)
+
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "HelixLocalAssistant/0.1 "
+                    "(read-only research; local personal assistant)"
+                ),
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+            },
+            method="GET",
+        )
+
+        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            content_type = response.headers.get("Content-Type", "")
+
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                return WebFetchResult(
+                    ok=False,
+                    url=url,
+                    domain=domain,
+                    risk=risk_info["risk"],
+                    reason=f"Tipo de conteúdo não permitido para leitura básica: {content_type}",
+                )
+
+            raw = response.read(MAX_PAGE_BYTES + 1)
+
+        if len(raw) > MAX_PAGE_BYTES:
+            raw = raw[:MAX_PAGE_BYTES]
+
+        html = raw.decode("utf-8", errors="replace")
+
+        parser = _TextExtractor()
+        parser.feed(html)
+
+        text = parser.get_text()
+        headings = [
+            h for h in parser.headings
+            if 3 <= len(h) <= 100 and not is_noise_line(h)
+        ][:10]
+        links = list(dict.fromkeys(parser.links))[:8]
+
+        if not text:
+            return WebFetchResult(
+                ok=False,
+                url=url,
+                domain=domain,
+                risk=risk_info["risk"],
+                bytes_read=len(raw),
+                reason="A página foi acessada, mas não consegui extrair texto útil depois dos filtros.",
+            )
+
+        return WebFetchResult(
+            ok=True,
+            url=url,
+            domain=domain,
+            title=parser.title,
+            text=text,
+            headings=headings,
+            links=links,
+            risk=risk_info["risk"],
+            bytes_read=len(raw),
+            reason=risk_info["reason"],
+        )
+
+    except Exception as exc:
+        return WebFetchResult(
+            ok=False,
+            url=url,
+            domain=domain,
+            risk=risk_info["risk"],
+            reason=f"Erro ao acessar página: {type(exc).__name__}: {exc}",
+        )
+
+
+def score_block(block: str, domain: str | None) -> int:
+    lowered = block.lower()
+    score = 0
+
+    strong_keywords = [
+        "fastapi", "python", "framework", "api", "openapi", "type hints",
+        "pydantic", "async", "database", "sqlalchemy", "postgresql",
+        "security", "deployment", "testing", "model", "dataset", "agent",
+        "memory", "rag", "obsidian", "github",
+    ]
+
+    for keyword in strong_keywords:
+        if keyword in lowered:
+            score += 3
+
+    # Prioriza blocos com cara de explicação.
+    if 80 <= len(block) <= 420:
+        score += 3
+    elif len(block) > 700:
+        score -= 4
+
+    if "." in block:
+        score += 1
+
+    if ":" in block:
+        score += 1
+
+    # Penaliza índice/menu residual.
+    if looks_like_menu_dump(block):
+        score -= 10
+
+    if any(phrase in lowered for phrase in NOISY_PHRASES):
+        score -= 8
+
+    return score
+
+
+def build_simple_summary(text: str, domain: str | None = None, max_items: int = 5) -> list[str]:
+    blocks = [line.strip() for line in text.splitlines() if line.strip()]
+    blocks = [block for block in blocks if is_useful_block(block)]
+
+    if not blocks:
+        return ["Consegui acessar a página, mas os filtros não encontraram parágrafos claros para resumir."]
+
+    ranked = sorted(blocks, key=lambda item: score_block(item, domain), reverse=True)
+
+    selected: list[str] = []
+    for block in ranked:
+        # Evita bloco longo demais na resposta.
+        if len(block) > 420:
+            block = block[:420].rsplit(" ", 1)[0].strip() + "..."
+
+        if block not in selected:
+            selected.append(block)
+
+        if len(selected) >= max_items:
+            break
+
+    return selected
+
+
+def build_usefulness_notes(result: WebFetchResult) -> list[str]:
+    domain = result.domain or ""
+    text = (result.text or "").lower()
+    notes: list[str] = []
+
+    if "fastapi" in domain or "fastapi" in text:
+        notes.extend([
+            "Revisar a organização de rotas e separar melhor endpoints em routers.",
+            "Verificar uso correto de Pydantic, CORS, lifespan, testes e deploy.",
+            "Usar a documentação como referência para melhorar `/chat`, `/tts`, `/system` e futuros endpoints.",
+        ])
+
+    if "sqlalchemy" in domain or "sqlalchemy" in text:
+        notes.extend([
+            "Melhorar a camada de banco, sessões, queries e models do PostgreSQL.",
+        ])
+
+    if "postgresql" in domain or "postgresql" in text:
+        notes.extend([
+            "Pesquisar otimização, backup, índices e estrutura da memória do Helix.",
+        ])
+
+    if "huggingface" in domain or "model" in text or "dataset" in text:
+        notes.extend([
+            "Catalogar modelos, datasets e ideias de IA sem baixar nada automaticamente.",
+        ])
+
+    if "obsidian" in domain or "obsidian" in text:
+        notes.extend([
+            "Melhorar a integração com o Helix Brain e organização das notas.",
+        ])
+
+    if "github.com" in domain:
+        notes.extend([
+            "Ler README, issues e exemplos de implementação sem clonar ou executar código.",
+        ])
+
+    if not notes:
+        notes.append("Usar como fonte de consulta, mas validar antes de transformar em decisão no projeto.")
+
+    return list(dict.fromkeys(notes))[:4]
+
+
+def build_web_page_response(result: WebFetchResult) -> str:
+    if not result.ok:
+        return (
+            "Não consegui acessar essa página com segurança.\n\n"
+            f"URL: `{result.url}`\n"
+            f"Domínio: `{result.domain or 'desconhecido'}`\n"
+            f"Risco: `{result.risk}`\n"
+            f"Motivo: {result.reason}"
+        )
+
+    title = result.title or "sem título detectado"
+    text = result.text or ""
+    headings = result.headings or []
+
+    summary_items = build_simple_summary(text, result.domain, max_items=5)
+    usefulness_notes = build_usefulness_notes(result)
+
+    response = (
+        "Acessei a página em modo somente leitura.\n\n"
+        f"URL: `{result.url}`\n"
+        f"Domínio: `{result.domain}`\n"
+        f"Título: {title}\n"
+        f"Bytes lidos: {result.bytes_read}\n\n"
+    )
+
+    if headings:
+        response += "Seções úteis detectadas:\n"
+        for heading in headings[:6]:
+            response += f"- {heading}\n"
+        response += "\n"
+
+    response += "Resumo limpo:\n"
+    for item in summary_items:
+        response += f"- {item}\n"
+
+    response += "\nPossível utilidade para o Helix:\n"
+    for note in usefulness_notes:
+        response += f"- {note}\n"
+
+    response += (
+        "\nObservação de segurança: nada foi baixado, instalado, executado ou enviado. "
+        "Foi apenas leitura de página."
+    )
+
+    return response
+
+
+def handle_web_access_intent(message: str) -> str | None:
+    """
+    Detecta pedidos simples de leitura de URL.
+
+    Exemplos:
+    - "leia https://fastapi.tiangolo.com/"
+    - "consulta https://docs.sqlalchemy.org/"
+    - "veja o que diz https://www.postgresql.org/docs/"
+    """
+
+    lowered = message.lower()
+    url = extract_url_from_message(message)
+
+    if not url:
+        return None
+
+    trigger_words = [
+        "leia",
+        "ler",
+        "consulta",
+        "consulte",
+        "acessa",
+        "acesse",
+        "abre",
+        "abra",
+        "olha",
+        "veja",
+        "resume",
+        "resuma",
+        "o que tem",
+        "o que diz",
+    ]
+
+    if not any(word in lowered for word in trigger_words):
+        return None
+
+    result = fetch_page_text(url)
+    return build_web_page_response(result)

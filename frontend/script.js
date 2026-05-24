@@ -242,6 +242,10 @@ async function sendMessage(message, voiceMode = false) {
       data.reply ||
       data.error ||
       "Resposta recebida.";
+    
+    const helixSpeechResponse =
+      data.speech_response ||
+      helixResponse;
 
     addMessage("helix", helixResponse);
 
@@ -252,7 +256,8 @@ async function sendMessage(message, voiceMode = false) {
       return;
     }
 
-    await speak(helixResponse);
+    await speak(helixSpeechResponse);
+
   } catch (error) {
     console.error(error);
     addMessage("helix", "Erro ao conectar com o backend do Helix.");

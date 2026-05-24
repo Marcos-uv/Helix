@@ -28,7 +28,32 @@ SAFE_ACTIONS = {
     "obsidian_read",
     "obsidian_search",
     "obsidian_restore",
+    "open_url",
 }
+
+
+def _is_safe_url(target: str) -> bool:
+    target = (target or "").lower().strip()
+
+    if not target:
+        return False
+
+    blocked_prefixes = [
+        "javascript:",
+        "file:",
+        "data:",
+        "vbscript:",
+    ]
+
+    if any(target.startswith(prefix) for prefix in blocked_prefixes):
+        return False
+
+    allowed_prefixes = [
+        "http://",
+        "https://",
+    ]
+
+    return any(target.startswith(prefix) for prefix in allowed_prefixes)
 
 
 def check_command_safety(action: str, target: str) -> dict:
@@ -41,6 +66,22 @@ def check_command_safety(action: str, target: str) -> dict:
             "requires_confirmation": False,
             "risk_level": "unknown",
             "reason": "Ação vazia ou inválida.",
+        }
+
+    if action == "open_url":
+        if _is_safe_url(target):
+            return {
+                "allowed": True,
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "reason": "URL HTTP/HTTPS considerada segura para abertura.",
+            }
+
+        return {
+            "allowed": False,
+            "requires_confirmation": True,
+            "risk_level": "high",
+            "reason": "URL inválida ou potencialmente perigosa.",
         }
 
     if action in SAFE_ACTIONS:

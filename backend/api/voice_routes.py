@@ -165,6 +165,10 @@ async def voice_chat(duration: int = 5, db: Session = Depends(get_db)):
         return {
             "user_text": user_text,
             "response": response.get("response", ""),
+            "speech_response": response.get(
+                "speech_response",
+                response.get("response", ""),
+            ),
             "spoken": False,
         }
 

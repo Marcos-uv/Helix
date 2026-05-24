@@ -53,3 +53,12 @@ temp/
 # Obsidian local workspace
 .obsidian/workspace.json
 .obsidian/workspace-mobile.json
+
+frontend_command_center/
+
+frontend/index - Copia.html
+frontend/orb - Copia.js
+frontend/script - Copia.js
+frontend/style - Copia.css
+
+data/
