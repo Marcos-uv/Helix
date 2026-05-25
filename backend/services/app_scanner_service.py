@@ -23,11 +23,13 @@ from backend.services.app_registry_service import (
 # -----------------------------------------------------------------------------
 # Este scanner trabalha por camadas:
 # 1. Menu Iniciar (.lnk)          -> fonte mais confiável para apps abríveis.
-# 2. Registro de instalados       -> bom para apps instalados oficialmente.
-# 3. Scan bruto de .exe           -> fallback, com filtro pesado.
+# 2. Área de Trabalho (.lnk)      -> fonte muito confiável para apps usados.
+# 3. Registro de instalados       -> bom, mas sujo; exige cautela.
+# 4. Scan bruto de .exe           -> fallback, com filtro pesado.
 #
-# O objetivo não é salvar qualquer .exe que existe no PC. O objetivo é alimentar
-# o known_apps com coisas que o usuário provavelmente espera abrir pelo Helix.
+# O objetivo não é salvar qualquer .exe que existe no PC.
+# O objetivo é alimentar o known_apps com coisas que o usuário provavelmente
+# espera abrir pelo Helix.
 # -----------------------------------------------------------------------------
 
 
@@ -35,6 +37,10 @@ BAD_NAME_KEYWORDS = {
     "installer",
     "install",
     "uninstall",
+    "uninstaller",
+    "uninst",
+    "desinstalar",
+    "desinstalador",
     "updater",
     "update",
     "autoupdate",
@@ -93,6 +99,7 @@ BAD_NAME_KEYWORDS = {
     "unins000",
 }
 
+
 BAD_FOLDER_PARTS = {
     "windows",
     "system32",
@@ -109,6 +116,7 @@ BAD_FOLDER_PARTS = {
     "crashpad",
     "logs",
 }
+
 
 INTERNAL_EXACT_NAMES = {
     # PostgreSQL internals
@@ -163,11 +171,35 @@ INTERNAL_EXACT_NAMES = {
     "steamwebhelper",
     "steamxboxutil",
     "steamxboxutil64",
+
+    # CLI/tools que geralmente não são apps gráficos principais
+    "rar",
+    "unrar",
 }
+
+
+SUSPICIOUS_EXE_NAMES = {
+    "launcher.exe",
+    "update.exe",
+    "updater.exe",
+    "helper.exe",
+    "service.exe",
+    "log-uploader.exe",
+    "log_uploader.exe",
+    "compatibilitytool.exe",
+    "amdsoftwarecompatibilitytool.exe",
+}
+
 
 COMMON_START_MENU_ROOTS = [
     Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
     Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+]
+
+
+COMMON_DESKTOP_ROOTS = [
+    Path(os.environ.get("USERPROFILE", "")) / "Desktop",
+    Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop",
 ]
 
 
@@ -184,6 +216,7 @@ BAD_START_MENU_FOLDER_PARTS = {
     "acessibilidade",
     "inicializar",
 }
+
 
 BAD_START_MENU_EXACT_NAMES = {
     "administrative tools",
@@ -218,6 +251,7 @@ BAD_START_MENU_EXACT_NAMES = {
     "desinstalar o lightshot",
 }
 
+
 FALLBACK_SCAN_ROOTS = [
     Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
     Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
@@ -230,13 +264,51 @@ FALLBACK_SCAN_ROOTS = [
 @dataclass
 class AppCandidate:
     name: str
-    exe_path: str
+
+    # Caminho que o Helix deve usar para abrir.
+    # Pode ser um .lnk do Menu Iniciar/Desktop ou um .exe direto.
+    launch_path: str
+
+    # Caminho real do executável, quando conhecido.
+    target_path: str | None
+
+    # Caminho do atalho, quando o candidato veio de .lnk.
+    shortcut_path: str | None
+
+    # Nome do processo esperado, ex: Spotify.exe, Discord.exe, Code.exe.
     process_name: str | None
+
+    # Origem: start_menu, desktop, windows_uninstall_registry, raw_exe_fallback.
     source: str
-    confidence: float
+
+    # Tipo: shortcut, app_principal, launcher, helper, updater, uninstaller, unknown.
+    candidate_type: str
+
+    # Tipo lógico usado pelo app_registry: browser, music, dev_tool etc.
+    app_type: str | None
+
+    # Apelidos/nomes alternativos usados para busca.
     aliases: list[str]
-    score: int
+
+    # Scores separados.
+    app_confidence: int
+    launch_quality: int
+    user_relevance: int
+    risk_score: int
+    final_score: int
+
+    # Compatibilidade com app_registry atual.
+    confidence: float
+
+    # Decisão do scanner.
+    is_launcher_candidate: bool
+    is_blocked: bool
+    requires_confirmation: bool
+
+    # Explicação.
     reasons: list[str]
+    penalties: list[str]
+    blocked_reason: str | None = None
 
 
 def _run_powershell_json(script: str, timeout: int = 25) -> list[dict[str, Any]]:
@@ -281,9 +353,9 @@ def _run_powershell_json(script: str, timeout: int = 25) -> list[dict[str, Any]]
     return []
 
 
-def _resolve_start_menu_shortcuts() -> list[dict[str, Any]]:
-    roots = [str(root) for root in COMMON_START_MENU_ROOTS if str(root)]
-    roots_json = json.dumps(roots)
+def _resolve_shortcuts(roots: list[Path]) -> list[dict[str, Any]]:
+    roots_clean = [str(root) for root in roots if root and str(root)]
+    roots_json = json.dumps(roots_clean)
 
     script = rf"""
 $roots = ConvertFrom-Json '{roots_json}'
@@ -309,6 +381,14 @@ $items | ConvertTo-Json -Depth 4
 """
 
     return _run_powershell_json(script)
+
+
+def _resolve_start_menu_shortcuts() -> list[dict[str, Any]]:
+    return _resolve_shortcuts(COMMON_START_MENU_ROOTS)
+
+
+def _resolve_desktop_shortcuts() -> list[dict[str, Any]]:
+    return _resolve_shortcuts(COMMON_DESKTOP_ROOTS)
 
 
 def _read_uninstall_registry() -> list[dict[str, Any]]:
@@ -350,6 +430,15 @@ def _contains_bad_keyword(value: str) -> bool:
         return True
 
     return any(keyword in text or keyword in normalized for keyword in BAD_NAME_KEYWORDS)
+
+
+def _is_suspicious_exe_name(path: Path) -> bool:
+    name = path.name.lower()
+    compact_name = name.replace("-", "").replace("_", "").replace(" ", "")
+    return name in SUSPICIOUS_EXE_NAMES or compact_name in {
+        item.replace("-", "").replace("_", "").replace(" ", "")
+        for item in SUSPICIOUS_EXE_NAMES
+    }
 
 
 def _is_bad_path(path: Path) -> bool:
@@ -400,7 +489,7 @@ def _aliases_for_shortcut(name: str, target_path: str | None, process_name: str 
     return sorted({alias for alias in aliases if alias})
 
 
-def _is_bad_start_menu_shortcut(shortcut_path: str, name: str) -> bool:
+def _is_bad_shortcut(shortcut_path: str, name: str) -> bool:
     normalized_name = normalize_app_name(name)
 
     if normalized_name in BAD_START_MENU_EXACT_NAMES:
@@ -414,65 +503,135 @@ def _is_bad_start_menu_shortcut(shortcut_path: str, name: str) -> bool:
     return False
 
 
-def _score_shortcut(item: dict[str, Any]) -> tuple[int, list[str]]:
+def _score_shortcut(item: dict[str, Any], source: str) -> tuple[int, list[str], list[str]]:
     name = _clean_display_name(str(item.get("Name") or ""))
     shortcut_path = str(item.get("ShortcutPath") or "")
     target_path = str(item.get("TargetPath") or "")
 
-    score = 95
-    reasons = ["atalho do Menu Iniciar"]
+    if source == "desktop":
+        score = 92
+        reasons = ["atalho da Área de Trabalho"]
+    else:
+        score = 95
+        reasons = ["atalho do Menu Iniciar"]
+
+    penalties: list[str] = []
 
     if not name or not shortcut_path:
-        return 0, ["atalho sem nome ou caminho"]
+        return 0, ["atalho sem nome ou caminho"], []
 
-    if _is_bad_start_menu_shortcut(shortcut_path, name):
-        return 0, ["atalho administrativo/do Windows ignorado"]
+    if _is_bad_shortcut(shortcut_path, name):
+        return 0, ["atalho administrativo/do Windows ignorado"], []
 
     if _contains_bad_keyword(name):
-        return 0, ["atalho parece instalador, updater, helper ou utilitário"]
+        return 0, ["atalho parece instalador, updater, helper ou utilitário"], []
 
-    if target_path and _contains_bad_keyword(Path(target_path).name):
-        # Não bloqueia automaticamente se o nome do atalho for humano, porque
-        # launchers como Discord podem usar Update.exe por baixo. Só reduz score.
-        score -= 15
-        reasons.append("destino parece launcher auxiliar, mas atalho é humano")
+    if target_path:
+        target = Path(target_path)
 
-    return max(score, 0), reasons
+        if _contains_bad_keyword(target.name):
+            # Não bloqueia automaticamente se o nome do atalho for humano,
+            # porque launchers como Discord podem usar Update.exe por baixo.
+            score -= 15
+            penalties.append("destino parece launcher auxiliar, mas atalho é humano")
+
+        if _is_suspicious_exe_name(target):
+            score -= 10
+            penalties.append("executável de destino tem nome genérico/suspeito")
+
+    return max(score, 0), reasons, penalties
 
 
-def _collect_start_menu_candidates() -> list[AppCandidate]:
+def _candidate_type_from_path(path: str | None, fallback: str = "app_principal") -> str:
+    if not path:
+        return fallback
+
+    p = Path(path)
+    name = p.name.lower()
+
+    if any(word in name for word in ["uninstall", "uninst", "desinstalar"]):
+        return "uninstaller"
+
+    if any(word in name for word in ["update", "updater", "autoupdate"]):
+        return "updater"
+
+    if any(word in name for word in ["helper", "service", "broker"]):
+        return "helper"
+
+    if "launcher" in name:
+        return "launcher"
+
+    return fallback
+
+
+def _collect_shortcut_candidates(
+    items: list[dict[str, Any]],
+    source: str,
+) -> list[AppCandidate]:
     candidates: list[AppCandidate] = []
 
-    for item in _resolve_start_menu_shortcuts():
+    for item in items:
         name = _clean_display_name(str(item.get("Name") or ""))
         shortcut_path = str(item.get("ShortcutPath") or "")
         target_path = str(item.get("TargetPath") or "")
         arguments = str(item.get("Arguments") or "")
 
-        score, reasons = _score_shortcut(item)
+        score, reasons, penalties = _score_shortcut(item, source=source)
         if score < 70:
             continue
 
-        path = Path(shortcut_path)
-        if not path.exists():
+        shortcut = Path(shortcut_path)
+        if not shortcut.exists():
             continue
 
         process_name = _parse_process_from_shortcut(target_path, arguments)
+        candidate_type = _candidate_type_from_path(target_path, fallback="shortcut")
+
+        risk_score = 5
+        if penalties:
+            risk_score += 10
 
         candidates.append(
             AppCandidate(
                 name=name,
-                exe_path=str(path),
+                launch_path=str(shortcut),
+                target_path=target_path or None,
+                shortcut_path=shortcut_path or str(shortcut),
                 process_name=process_name,
-                source="start_menu",
-                confidence=round(score / 100, 2),
+                source=source,
+                candidate_type=candidate_type,
+                app_type=None,
                 aliases=_aliases_for_shortcut(name, target_path, process_name),
-                score=score,
+                app_confidence=score,
+                launch_quality=95 if source == "start_menu" else 92,
+                user_relevance=55 if source == "desktop" else 50,
+                risk_score=risk_score,
+                final_score=score,
+                confidence=round(score / 100, 2),
+                is_launcher_candidate=True,
+                is_blocked=False,
+                requires_confirmation=score < 85,
                 reasons=reasons,
+                penalties=penalties,
+                blocked_reason=None,
             )
         )
 
     return candidates
+
+
+def _collect_start_menu_candidates() -> list[AppCandidate]:
+    return _collect_shortcut_candidates(
+        items=_resolve_start_menu_shortcuts(),
+        source="start_menu",
+    )
+
+
+def _collect_desktop_candidates() -> list[AppCandidate]:
+    return _collect_shortcut_candidates(
+        items=_resolve_desktop_shortcuts(),
+        source="desktop",
+    )
 
 
 def _extract_icon_exe(display_icon: str | None) -> str | None:
@@ -481,16 +640,29 @@ def _extract_icon_exe(display_icon: str | None) -> str | None:
 
     value = os.path.expandvars(str(display_icon)).strip().strip('"')
 
-    # DisplayIcon costuma vir como: "C:\\Path\\App.exe",0
+    # DisplayIcon costuma vir como:
+    # "C:\\Path\\App.exe",0
     match = re.search(r"(.+?\.exe)", value, flags=re.IGNORECASE)
     if not match:
         return None
 
-    candidate = Path(match.group(1).strip().strip('"'))
-    if candidate.exists() and not _is_bad_path(candidate):
+    raw_path = match.group(1).strip().strip('"')
+    candidate = Path(raw_path)
+
+    try:
+        if not candidate.exists():
+            return None
+
+        if _is_bad_path(candidate):
+            return None
+
+        if _contains_bad_keyword(candidate.name):
+            return None
+
         return str(candidate)
 
-    return None
+    except (PermissionError, OSError):
+        return None
 
 
 def _find_main_exe_in_install_location(location: str | None, display_name: str) -> str | None:
@@ -514,10 +686,15 @@ def _find_main_exe_in_install_location(location: str | None, display_name: str) 
 
             if normalized_exe and normalized_exe in normalized_display:
                 score += 40
+
             if normalized_display and normalized_display in normalized_exe:
                 score += 40
+
             if exe.parent == root:
                 score += 20
+
+            if _is_suspicious_exe_name(exe):
+                score -= 25
 
             candidates.append((score, exe))
 
@@ -554,33 +731,68 @@ def _collect_registry_candidates() -> list[AppCandidate]:
             continue
 
         path = Path(exe_path)
+
+        if _is_bad_path(path) or _contains_bad_keyword(path.name):
+            continue
+
         process_name = path.name if path.suffix.lower() == ".exe" else None
+
+        penalties = ["fonte menos confiável que Menu Iniciar"]
+        app_confidence = 78
+        launch_quality = 75
+        user_relevance = 40
+        risk_score = 20
+        final_score = 76
+        requires_confirmation = True
+
+        if _is_suspicious_exe_name(path):
+            penalties.append("executável genérico/suspeito vindo do registro")
+            launch_quality -= 10
+            risk_score += 15
+            final_score -= 15
+
+        final_score = max(final_score, 0)
+        confidence = round(final_score / 100, 2)
 
         candidates.append(
             AppCandidate(
                 name=name,
-                exe_path=str(path),
+                launch_path=str(path),
+                target_path=str(path),
+                shortcut_path=None,
                 process_name=process_name,
                 source="windows_uninstall_registry",
-                confidence=0.86,
-                aliases=[name, path.stem, process_name or ""],
-                score=86,
+                candidate_type=_candidate_type_from_path(str(path), fallback="app_principal"),
+                app_type=None,
+                aliases=[alias for alias in [name, path.stem, process_name or ""] if alias],
+                app_confidence=app_confidence,
+                launch_quality=launch_quality,
+                user_relevance=user_relevance,
+                risk_score=risk_score,
+                final_score=final_score,
+                confidence=confidence,
+                is_launcher_candidate=final_score >= 60,
+                is_blocked=False,
+                requires_confirmation=requires_confirmation,
                 reasons=["registro de programas instalados do Windows"],
+                penalties=penalties,
+                blocked_reason=None,
             )
         )
 
     return candidates
 
 
-def _score_raw_exe(path: Path, root: Path) -> tuple[int, list[str]]:
+def _score_raw_exe(path: Path, root: Path) -> tuple[int, list[str], list[str]]:
     if not path.exists() or path.suffix.lower() != ".exe":
-        return 0, ["não é executável"]
+        return 0, ["não é executável"], []
 
     if _is_bad_path(path):
-        return 0, ["parece auxiliar, setup, updater, cache ou ferramenta interna"]
+        return 0, ["parece auxiliar, setup, updater, cache ou ferramenta interna"], []
 
     score = 30
     reasons = ["executável encontrado por fallback"]
+    penalties: list[str] = []
 
     try:
         relative_parts = path.relative_to(root).parts
@@ -599,8 +811,9 @@ def _score_raw_exe(path: Path, root: Path) -> tuple[int, list[str]]:
         score += 25
         reasons.append("nome do exe combina com a pasta")
 
-    # Apps instalados por usuário, especialmente Spotify, ficam fora de Program Files.
     path_text = str(path).lower()
+
+    # Apps instalados por usuário, especialmente Spotify, ficam fora de Program Files.
     if "\\spotify\\" in path_text or "/spotify/" in path_text:
         score += 35
         reasons.append("caminho típico do Spotify")
@@ -609,7 +822,15 @@ def _score_raw_exe(path: Path, root: Path) -> tuple[int, list[str]]:
         score += 15
         reasons.append("pasta Programs do usuário")
 
-    return min(score, 95), reasons
+    if "\\windowsapps\\" in path_text or "/windowsapps/" in path_text:
+        score -= 10
+        penalties.append("WindowsApps pode exigir abertura por atalho/URI")
+
+    if _is_suspicious_exe_name(path):
+        score -= 20
+        penalties.append("executável genérico/suspeito")
+
+    return min(max(score, 0), 95), reasons, penalties
 
 
 def _iter_exes_limited(root: Path, max_depth: int, limit: int) -> list[Path]:
@@ -618,7 +839,10 @@ def _iter_exes_limited(root: Path, max_depth: int, limit: int) -> list[Path]:
     if not root.exists() or not root.is_dir():
         return results
 
-    root = root.resolve()
+    try:
+        root = root.resolve()
+    except Exception:
+        return results
 
     stack = [(root, 0)]
 
@@ -658,23 +882,40 @@ def _collect_raw_exe_candidates(max_depth: int, limit: int) -> list[AppCandidate
             continue
 
         for exe in _iter_exes_limited(root, max_depth=max_depth, limit=per_root_limit):
-            score, reasons = _score_raw_exe(exe, root)
+            score, reasons, penalties = _score_raw_exe(exe, root)
             if score < 70:
                 continue
 
             name = exe.stem.replace("_", " ").replace("-", " ").strip()
             name = re.sub(r"\s+", " ", name).title()
 
+            risk_score = 15
+            if penalties:
+                risk_score += 10
+
             candidates.append(
                 AppCandidate(
                     name=name,
-                    exe_path=str(exe),
+                    launch_path=str(exe),
+                    target_path=str(exe),
+                    shortcut_path=None,
                     process_name=exe.name,
                     source="raw_exe_fallback",
-                    confidence=round(score / 100, 2),
+                    candidate_type=_candidate_type_from_path(str(exe), fallback="app_principal"),
+                    app_type=None,
                     aliases=[name, exe.stem, exe.name],
-                    score=score,
+                    app_confidence=score,
+                    launch_quality=score,
+                    user_relevance=30,
+                    risk_score=risk_score,
+                    final_score=score,
+                    confidence=round(score / 100, 2),
+                    is_launcher_candidate=score >= 70,
+                    is_blocked=False,
+                    requires_confirmation=True,
                     reasons=reasons,
+                    penalties=penalties,
+                    blocked_reason=None,
                 )
             )
 
@@ -682,13 +923,13 @@ def _collect_raw_exe_candidates(max_depth: int, limit: int) -> list[AppCandidate
 
 
 def _candidate_key(candidate: AppCandidate) -> str:
-    # Para atalhos, o caminho do .lnk é a melhor chave, porque abre direto.
-    return str(Path(candidate.exe_path)).lower()
+    return str(Path(candidate.launch_path)).lower()
 
 
 def _deduplicate_candidates(candidates: list[AppCandidate]) -> list[AppCandidate]:
     priority = {
-        "start_menu": 3,
+        "start_menu": 4,
+        "desktop": 3,
         "windows_uninstall_registry": 2,
         "raw_exe_fallback": 1,
     }
@@ -701,11 +942,23 @@ def _deduplicate_candidates(candidates: list[AppCandidate]) -> list[AppCandidate
         name_key = normalize_app_name(candidate.name)
 
         current = best_by_key.get(key)
-        if current is None or (priority.get(candidate.source, 0), candidate.score) > (priority.get(current.source, 0), current.score):
+        if current is None or (
+            priority.get(candidate.source, 0),
+            candidate.final_score,
+        ) > (
+            priority.get(current.source, 0),
+            current.final_score,
+        ):
             best_by_key[key] = candidate
 
         current_name = best_by_name.get(name_key)
-        if current_name is None or (priority.get(candidate.source, 0), candidate.score) > (priority.get(current_name.source, 0), current_name.score):
+        if current_name is None or (
+            priority.get(candidate.source, 0),
+            candidate.final_score,
+        ) > (
+            priority.get(current_name.source, 0),
+            current_name.final_score,
+        ):
             best_by_name[name_key] = candidate
 
     merged = list(best_by_key.values())
@@ -717,7 +970,14 @@ def _deduplicate_candidates(candidates: list[AppCandidate]) -> list[AppCandidate
         preferred = best_by_name.get(name_key, candidate)
         final[_candidate_key(preferred)] = preferred
 
-    return sorted(final.values(), key=lambda item: (item.source != "start_menu", item.name.lower()))
+    return sorted(
+        final.values(),
+        key=lambda item: (
+            item.source != "start_menu",
+            item.source != "desktop",
+            item.name.lower(),
+        ),
+    )
 
 
 def scan_apps(db: Session, max_depth: int = 5, limit: int = 500) -> dict[str, Any]:
@@ -729,6 +989,11 @@ def scan_apps(db: Session, max_depth: int = 5, limit: int = 500) -> dict[str, An
         candidates.extend(_collect_start_menu_candidates())
     except Exception as exc:
         errors.append({"source": "start_menu", "error": str(exc)})
+
+    try:
+        candidates.extend(_collect_desktop_candidates())
+    except Exception as exc:
+        errors.append({"source": "desktop", "error": str(exc)})
 
     try:
         candidates.extend(_collect_registry_candidates())
@@ -751,10 +1016,10 @@ def scan_apps(db: Session, max_depth: int = 5, limit: int = 500) -> dict[str, An
             app = upsert_known_app(
                 db,
                 name=candidate.name,
-                exe_path=candidate.exe_path,
+                exe_path=candidate.launch_path,
                 process_name=candidate.process_name,
                 aliases=candidate.aliases,
-                app_type=guess_app_type(candidate.name, candidate.exe_path),
+                app_type=candidate.app_type or guess_app_type(candidate.name, candidate.launch_path),
                 source=candidate.source,
                 confidence=candidate.confidence,
             )
@@ -762,12 +1027,39 @@ def scan_apps(db: Session, max_depth: int = 5, limit: int = 500) -> dict[str, An
             item = {
                 "id": app.id,
                 "name": candidate.name,
-                "exe_path": candidate.exe_path,
+
+                # Compatibilidade com o app_registry atual.
+                "exe_path": candidate.launch_path,
+
+                # Novo modelo rico do scanner.
+                "launch_path": candidate.launch_path,
+                "target_path": candidate.target_path,
+                "shortcut_path": candidate.shortcut_path,
+
                 "process_name": candidate.process_name,
                 "source": candidate.source,
-                "score": candidate.score,
+                "candidate_type": candidate.candidate_type,
+                "app_type": candidate.app_type,
+
+                "app_confidence": candidate.app_confidence,
+                "launch_quality": candidate.launch_quality,
+                "user_relevance": candidate.user_relevance,
+                "risk_score": candidate.risk_score,
+                "final_score": candidate.final_score,
+
+                # Compatibilidade visual antiga.
+                "score": candidate.final_score,
+
+                "confidence": candidate.confidence,
+                "is_launcher_candidate": candidate.is_launcher_candidate,
+                "is_blocked": candidate.is_blocked,
+                "requires_confirmation": candidate.requires_confirmation,
                 "is_active": app.is_active,
+
+                "aliases": candidate.aliases,
                 "reasons": candidate.reasons,
+                "penalties": candidate.penalties,
+                "blocked_reason": candidate.blocked_reason,
             }
 
             if app.is_active:
@@ -794,7 +1086,10 @@ def scan_apps(db: Session, max_depth: int = 5, limit: int = 500) -> dict[str, An
         "cache": cache_result,
         "sources": {
             "start_menu": len([item for item in candidates if item.source == "start_menu"]),
-            "windows_uninstall_registry": len([item for item in candidates if item.source == "windows_uninstall_registry"]),
+            "desktop": len([item for item in candidates if item.source == "desktop"]),
+            "windows_uninstall_registry": len(
+                [item for item in candidates if item.source == "windows_uninstall_registry"]
+            ),
             "raw_exe_fallback": len([item for item in candidates if item.source == "raw_exe_fallback"]),
         },
         "saved_preview": saved_apps[:30],
