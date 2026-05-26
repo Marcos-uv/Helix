@@ -2529,6 +2529,26 @@ async def process_chat_logic(request, db: Session):
 
         return build_chat_response(result)
 
+
+    web_access_result = handle_web_access_intent(user_message)
+
+    if web_access_result:
+        _save_history(db, user.id, user_message, web_access_result)
+
+        try:
+            log_event_to_obsidian(
+                event="Acesso web consultado pelo chat.",
+                context="/chat",
+                details="O usuário pediu leitura/resumo de página ou URL.",
+                user_name=user_name,
+            )
+
+        except Exception as exc:
+            print(f"Erro ao registrar acesso web no Obsidian: {exc}")
+
+        return build_chat_response(web_access_result)
+
+
     # 3. Contexto de projeto / leitura real da pasta do projeto.
     # Isso dá ao Helix olhos para entender D:\Helix como o próprio projeto
     # e também analisar outras pastas informadas pelo usuário.
