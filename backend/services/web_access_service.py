@@ -1270,6 +1270,153 @@ def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
 
     return score
 
+def web_search_result_to_dict(result: WebSearchResult) -> dict[str, Any]:
+    return {
+        "title": result.title,
+        "url": result.url,
+        "domain": result.domain,
+        "snippet": result.snippet,
+    }
+
+
+def rank_web_search_results(query: str, results: list[WebSearchResult]) -> list[WebSearchResult]:
+    return sorted(
+        results,
+        key=lambda item: score_search_result_for_summary(item, query),
+        reverse=True,
+    )
+
+
+def get_source_type(query: str, domain: str | None) -> str:
+    expected_domains = get_expected_official_domains(query)
+
+    if (domain or "").lower() in expected_domains:
+        return "fonte oficial esperada"
+
+    return "melhor fonte encontrada"
+
+def build_search_summary_payload(query: str, results: list[WebSearchResult]) -> dict[str, Any]:
+    if not results:
+        return {
+            "ok": False,
+            "query": query,
+            "count": 0,
+            "source": None,
+            "summary": [],
+            "other_sources": [],
+            "response": build_web_search_response(query, results),
+            "reason": "Nenhum resultado útil encontrado.",
+        }
+
+    ranked_results = rank_web_search_results(query, results)
+    best = ranked_results[0]
+
+    page_result = fetch_page_text(best.url)
+
+    if not page_result.ok:
+        return {
+            "ok": False,
+            "query": query,
+            "count": len(results),
+            "source": web_search_result_to_dict(best),
+            "summary": [],
+            "other_sources": [
+                web_search_result_to_dict(item)
+                for item in ranked_results[1:4]
+            ],
+            "response": build_search_and_summary_response(query, results),
+            "reason": page_result.reason,
+        }
+
+    summary_items = build_practical_summary(
+        page_result.text or "",
+        page_result.domain,
+        max_items=6,
+    )
+
+    source = web_search_result_to_dict(best)
+    source["type"] = get_source_type(query, best.domain)
+
+    return {
+        "ok": True,
+        "query": query,
+        "count": len(results),
+        "source": source,
+        "summary": summary_items,
+        "other_sources": [
+            web_search_result_to_dict(item)
+            for item in ranked_results[1:4]
+        ],
+        "response": build_search_and_summary_response(query, results),
+        "reason": None,
+    }
+
+def build_technical_web_answer_payload(query: str, results: list[WebSearchResult]) -> dict[str, Any]:
+    if not results:
+        return {
+            "ok": False,
+            "query": query,
+            "count": 0,
+            "source": None,
+            "summary": [],
+            "helix_notes": [],
+            "other_sources": [],
+            "response": build_web_search_response(query, results),
+            "reason": "Nenhum resultado útil encontrado.",
+        }
+
+    ranked_results = rank_web_search_results(query, results)
+    best = ranked_results[0]
+
+    page_result = fetch_page_text(best.url)
+
+    if not page_result.ok:
+        return {
+            "ok": False,
+            "query": query,
+            "count": len(results),
+            "source": web_search_result_to_dict(best),
+            "summary": [],
+            "helix_notes": [],
+            "other_sources": [
+                web_search_result_to_dict(item)
+                for item in ranked_results[1:4]
+            ],
+            "response": build_technical_web_answer(query, results),
+            "reason": page_result.reason,
+        }
+
+    summary_items = build_practical_summary(
+        page_result.text or "",
+        page_result.domain,
+        max_items=6,
+    )
+
+    helix_notes_text = build_helix_application_notes(query)
+    helix_notes = [
+        line.strip("- ").strip()
+        for line in helix_notes_text.splitlines()
+        if line.strip()
+    ]
+
+    source = web_search_result_to_dict(best)
+    source["type"] = get_source_type(query, best.domain)
+
+    return {
+        "ok": True,
+        "query": query,
+        "count": len(results),
+        "source": source,
+        "summary": summary_items,
+        "helix_notes": helix_notes,
+        "other_sources": [
+            web_search_result_to_dict(item)
+            for item in ranked_results[1:4]
+        ],
+        "response": build_technical_web_answer(query, results),
+        "reason": None,
+    }
+
 def build_search_and_summary_response(query: str, results: list[WebSearchResult]) -> str:
     if not results:
         return build_web_search_response(query, results)
