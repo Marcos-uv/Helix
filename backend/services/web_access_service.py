@@ -5,7 +5,7 @@ import socket
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -25,6 +25,14 @@ from urllib.request import Request, urlopen
 REQUEST_TIMEOUT_SECONDS = 8
 MAX_PAGE_BYTES = 700_000
 MAX_EXTRACTED_CHARS = 14_000
+
+MAX_SEARCH_RESULTS = 5
+SEARCH_TIMEOUT_SECONDS = 8
+
+SEARCH_RESULT_BLOCKED_DOMAINS = {
+    "duckduckgo.com",
+    "www.duckduckgo.com",
+}
 
 ALLOWED_DOMAINS = {
     # Docs / programação
@@ -125,6 +133,12 @@ MENU_KEYWORDS = [
     "openapi",
 ]
 
+@dataclass
+class WebSearchResult:
+    title: str | None
+    url: str | None
+    snippet: str | None
+    domain: str | None
 
 @dataclass
 class WebFetchResult:
@@ -618,6 +632,199 @@ def build_usefulness_notes(result: WebFetchResult) -> list[str]:
     return list(dict.fromkeys(notes))[:4]
 
 
+class DuckDuckGoHTMLSearchParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.results: list[WebSearchResult] = []
+
+        self._inside_result_link = False
+        self._inside_snippet = False
+
+        self._current_url = ""
+        self._current_title_parts: list[str] = []
+        self._current_snippet_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = dict(attrs)
+        class_name = attrs_dict.get("class", "") or ""
+
+        if tag == "a" and "result__a" in class_name:
+            self._inside_result_link = True
+            self._current_url = attrs_dict.get("href", "") or ""
+            self._current_title_parts = []
+            self._current_snippet_parts = []
+
+        if tag in {"a", "div"} and "result__snippet" in class_name:
+            self._inside_snippet = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._inside_result_link:
+            self._inside_result_link = False
+
+            title = clean_block(" ".join(self._current_title_parts))
+            url = self._clean_duckduckgo_url(self._current_url)
+
+            if title and url:
+                domain = get_domain(url)
+
+                if domain not in SEARCH_RESULT_BLOCKED_DOMAINS:
+                    self.results.append(
+                        WebSearchResult(
+                            title=title,
+                            url=url,
+                            snippet="",
+                            domain=domain,
+                        )
+                    )
+
+        if tag in {"a", "div"} and self._inside_snippet:
+            self._inside_snippet = False
+
+            snippet = clean_block(" ".join(self._current_snippet_parts))
+
+            if snippet and self.results:
+                last = self.results[-1]
+
+                if not last.snippet:
+                    last.snippet = snippet
+
+    def handle_data(self, data: str) -> None:
+        if self._inside_result_link:
+            self._current_title_parts.append(data)
+
+        if self._inside_snippet:
+            self._current_snippet_parts.append(data)
+
+    def _clean_duckduckgo_url(self, url: str) -> str:
+        if not url:
+            return ""
+
+        url = url.strip()
+
+        if url.startswith("//"):
+            url = "https:" + url
+
+        if "duckduckgo.com/l/?" in url and "uddg=" in url:
+            parsed = urlparse(url)
+            query_parts = parsed.query.split("&")
+
+            for part in query_parts:
+                if part.startswith("uddg="):
+                    from urllib.parse import unquote
+
+                    return unquote(part.replace("uddg=", "", 1))
+
+        return url
+
+def is_web_search_intent(message: str) -> bool:
+    text = message.lower().strip()
+
+    search_triggers = [
+        "pesquise na internet",
+        "pesquisar na internet",
+        "pesquisa na internet",
+        "procure na internet",
+        "procurar na internet",
+        "busque na internet",
+        "buscar na internet",
+        "pesquise na web",
+        "pesquisar na web",
+        "procure na web",
+        "busque na web",
+        "pesquise sobre",
+        "pesquisar sobre",
+        "pesquisa sobre",
+        "procure sobre",
+        "buscar sobre",
+        "busque sobre",
+    ]
+
+    return any(trigger in text for trigger in search_triggers)
+
+
+def extract_search_query(message: str) -> str:
+    text = message.strip()
+
+    patterns = [
+        r"pesquise na internet sobre\s+(.+)",
+        r"pesquisar na internet sobre\s+(.+)",
+        r"pesquisa na internet sobre\s+(.+)",
+        r"procure na internet sobre\s+(.+)",
+        r"procurar na internet sobre\s+(.+)",
+        r"busque na internet sobre\s+(.+)",
+        r"buscar na internet sobre\s+(.+)",
+        r"pesquise na web sobre\s+(.+)",
+        r"pesquisar na web sobre\s+(.+)",
+        r"procure na web sobre\s+(.+)",
+        r"busque na web sobre\s+(.+)",
+        r"pesquise sobre\s+(.+)",
+        r"pesquisar sobre\s+(.+)",
+        r"pesquisa sobre\s+(.+)",
+        r"procure sobre\s+(.+)",
+        r"buscar sobre\s+(.+)",
+        r"busque sobre\s+(.+)",
+    ]
+
+    lowered = text.lower()
+
+    for pattern in patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+
+        if match:
+            query = text[match.start(1):].strip()
+            return re.sub(r"[?.!]+$", "", query).strip()
+
+    return ""
+
+
+def fetch_web_search_results(query: str) -> list[WebSearchResult]:
+    query = query.strip()
+
+    if not query:
+        return []
+
+    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+
+    request = Request(
+        search_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
+            raw = response.read(400_000)
+
+    except Exception as exc:
+        print(f"Erro ao pesquisar na web: {exc}")
+        return []
+
+    html = raw.decode("utf-8", errors="ignore")
+
+    parser = DuckDuckGoHTMLSearchParser()
+    parser.feed(html)
+
+    unique_results = []
+    seen_urls = set()
+
+    for result in parser.results:
+        if not result.url or result.url in seen_urls:
+            continue
+
+        seen_urls.add(result.url)
+        unique_results.append(result)
+
+        if len(unique_results) >= MAX_SEARCH_RESULTS:
+            break
+
+    return unique_results
+
 def build_web_page_response(result: WebFetchResult) -> str:
     if not result.ok:
         return (
@@ -657,49 +864,231 @@ def build_web_page_response(result: WebFetchResult) -> str:
     for note in usefulness_notes:
         response += f"- {note}\n"
 
-    response += (
-        "\nObservação de segurança: nada foi baixado, instalado, executado ou enviado. "
-        "Foi apenas leitura de página."
-    )
 
     return response
 
+def build_web_search_response(query: str, results: list[WebSearchResult]) -> str:
+    if not results:
+        return (
+            "Não encontrei resultados úteis para essa pesquisa.\n\n"
+            f"Busca: `{query}`\n\n"
+            "Pode ser bloqueio do mecanismo de busca, termo muito genérico ou o HTML da busca mudou. "
+            "A internet sendo a internet: uma bagunça com protocolo."
+        )
+
+    response = (
+        "Pesquisei na web e encontrei estes resultados:\n\n"
+        f"Busca: `{query}`\n\n"
+    )
+
+    for index, result in enumerate(results, start=1):
+        response += f"{index}. **{result.title}**\n"
+        response += f"   - Domínio: `{result.domain or 'desconhecido'}`\n"
+        response += f"   - URL: `{result.url}`\n"
+
+        if result.snippet:
+            response += f"   - Resumo: {result.snippet}\n"
+
+        response += "\n"
+
+    response += (
+        "Posso ler/resumir um desses links depois, se você mandar a URL específica."
+    )
+
+    return response.strip()
+
+def wants_search_and_summary(message: str) -> bool:
+    lowered = message.lower()
+
+    search_and_summary_triggers = [
+        "pesquise e resuma",
+        "pesquisar e resumir",
+        "procure e resuma",
+        "procurar e resumir",
+        "busque e resuma",
+        "buscar e resumir",
+        "pesquise na internet e resuma",
+        "pesquisar na internet e resumir",
+        "procure na internet e resuma",
+        "procurar na internet e resumir",
+        "busque na internet e resuma",
+        "buscar na internet e resumir",
+        "e resuma",
+        "e resume",
+        "e leia",
+        "e ler",
+        "resuma a melhor fonte",
+        "resuma o melhor resultado",
+        "leia a melhor fonte",
+        "leia o melhor resultado",
+        "resuma a fonte oficial",
+        "resuma automaticamente",
+        "me dê um resumo",
+        "me de um resumo",
+        "traz pra mim um resumo",
+    ]
+
+    return any(trigger in lowered for trigger in search_and_summary_triggers)
+
+def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
+    score = 0
+
+    domain = (result.domain or "").lower()
+    title = (result.title or "").lower()
+    url = (result.url or "").lower()
+    query_lower = query.lower()
+
+    official_domains = [
+        "fastapi.tiangolo.com",
+        "pydantic.dev",
+        "docs.python.org",
+        "docs.sqlalchemy.org",
+        "www.postgresql.org",
+        "postgresql.org",
+        "developer.mozilla.org",
+        "react.dev",
+        "vite.dev",
+        "tailwindcss.com",
+        "docs.github.com",
+        "learn.microsoft.com",
+        "platform.openai.com",
+        "ollama.com",
+    ]
+
+    lower_quality_domains = [
+        "medium.com",
+        "geeksforgeeks.org",
+        "datacamp.com",
+    ]
+
+    if domain in official_domains:
+        score += 50
+
+    if any(part in url for part in ["/docs", "/tutorial", "/reference", "/learn"]):
+        score += 15
+
+    for word in query_lower.split():
+        if len(word) >= 4 and word in title:
+            score += 8
+
+    if "official" in title or "docs" in title or "documentation" in title:
+        score += 10
+
+    if domain in lower_quality_domains:
+        score -= 15
+
+    return score
+
+def build_search_and_summary_response(query: str, results: list[WebSearchResult]) -> str:
+    if not results:
+        return build_web_search_response(query, results)
+
+    ranked_results = sorted(
+        results,
+        key=lambda item: score_search_result_for_summary(item, query),
+        reverse=True,
+    )
+
+    best = ranked_results[0]
+
+    page_result = fetch_page_text(best.url)
+
+    if not page_result.ok:
+        response = (
+            "Pesquisei na web, mas não consegui ler a melhor fonte com segurança.\n\n"
+            f"Busca: `{query}`\n\n"
+            f"Melhor resultado encontrado:\n"
+            f"- **{best.title}**\n"
+            f"- Domínio: `{best.domain or 'desconhecido'}`\n"
+            f"- URL: `{best.url}`\n\n"
+            f"Motivo da falha ao ler: {page_result.reason}\n\n"
+            "Resultados alternativos:\n"
+        )
+
+        for index, result in enumerate(ranked_results[1:4], start=1):
+            response += (
+                f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
+                f"   - URL: `{result.url}`\n"
+            )
+
+        return response.strip()
+
+    summary_items = build_simple_summary(
+        page_result.text or "",
+        page_result.domain,
+        max_items=6,
+    )
+
+    response = (
+        "Pesquisei na web e resumi a melhor fonte que encontrei.\n\n"
+        f"Busca: `{query}`\n"
+        f"Fonte escolhida: **{best.title}**\n"
+        f"Domínio: `{best.domain or page_result.domain or 'desconhecido'}`\n"
+        f"URL: `{best.url}`\n\n"
+        "Resumo:\n"
+    )
+
+    for item in summary_items:
+        response += f"- {item}\n"
+
+    response += "\nOutras fontes encontradas:\n"
+
+    for index, result in enumerate(ranked_results[1:4], start=1):
+        response += (
+            f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
+            f"   - URL: `{result.url}`\n"
+        )
+
+    return response.strip()
 
 def handle_web_access_intent(message: str) -> str | None:
     """
-    Detecta pedidos simples de leitura de URL.
+    Detecta pedidos simples de leitura de URL e pesquisa web.
 
     Exemplos:
     - "leia https://fastapi.tiangolo.com/"
     - "consulta https://docs.sqlalchemy.org/"
-    - "veja o que diz https://www.postgresql.org/docs/"
+    - "resuma https://www.postgresql.org/docs/"
+    - "pesquise na internet sobre FastAPI routers"
+    - "procure na web sobre Pydantic BaseModel"
     """
 
     lowered = message.lower()
     url = extract_url_from_message(message)
 
-    if not url:
-        return None
+    if url:
+        trigger_words = [
+            "leia",
+            "ler",
+            "consulta",
+            "consulte",
+            "acessa",
+            "acesse",
+            "abre",
+            "abra",
+            "olha",
+            "veja",
+            "resume",
+            "resuma",
+            "o que tem",
+            "o que diz",
+        ]
 
-    trigger_words = [
-        "leia",
-        "ler",
-        "consulta",
-        "consulte",
-        "acessa",
-        "acesse",
-        "abre",
-        "abra",
-        "olha",
-        "veja",
-        "resume",
-        "resuma",
-        "o que tem",
-        "o que diz",
-    ]
+        if not any(word in lowered for word in trigger_words):
+            return None
 
-    if not any(word in lowered for word in trigger_words):
-        return None
+        result = fetch_page_text(url)
+        return build_web_page_response(result)
 
-    result = fetch_page_text(url)
-    return build_web_page_response(result)
+    if is_web_search_intent(message):
+        query = extract_search_query(message)
+
+        if not query:
+            return "Entendi que você quer pesquisar na web, mas não achei o termo da busca."
+
+    results = fetch_web_search_results(query)
+
+    if wants_search_and_summary(message):
+        return build_search_and_summary_response(query, results)
+
+    return build_web_search_response(query, results)
