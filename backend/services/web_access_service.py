@@ -178,6 +178,61 @@ NOISY_PHRASES = [
     "source code",
 ]
 
+PRACTICAL_SUMMARY_KEYWORDS = [
+    "is used to",
+    "used to",
+    "allows",
+    "lets you",
+    "you can",
+    "define",
+    "create",
+    "validate",
+    "validation",
+    "serialize",
+    "serialization",
+    "data",
+    "model",
+    "request",
+    "response",
+    "example",
+    "usage",
+    "how to",
+    "helps",
+    "provides",
+    "represents",
+    "serves",
+    "configure",
+    "organize",
+    "structure",
+    "include",
+    "import",
+    "class",
+    "function",
+]
+
+TECHNICAL_NOISE_KEYWORDS = [
+    "__",
+    "deprecated",
+    "metadata",
+    "generic",
+    "alias",
+    "aliases",
+    "internals",
+    "private",
+    "attribute",
+    "attributes",
+    "parameter item",
+    "origin and args",
+    "trusted or pre-validated",
+    "will not work",
+    "replaces",
+    "root_validators",
+    "validators",
+    "the open group",
+    "base specifications",
+    "paragraph",
+]
+
 MENU_KEYWORDS = [
     "features",
     "learn",
@@ -628,6 +683,63 @@ def score_block(block: str, domain: str | None) -> int:
 
     return score
 
+def score_practical_summary_block(block: str, domain: str | None = None) -> int:
+    text = block.lower().strip()
+    score = 0
+
+    if not text:
+        return -999
+
+    # Tamanho ideal: nem migalha, nem testamento.
+    length = len(text)
+
+    if 80 <= length <= 420:
+        score += 20
+    elif 40 <= length < 80:
+        score += 8
+    elif length > 650:
+        score -= 20
+
+    for keyword in PRACTICAL_SUMMARY_KEYWORDS:
+        if keyword in text:
+            score += 8
+
+    for keyword in TECHNICAL_NOISE_KEYWORDS:
+        if keyword in text:
+            score -= 18
+
+    # Frases com muitos símbolos internos costumam ser API interna, não explicação.
+    if text.count("__") >= 1:
+        score -= 35
+
+    if text.count("(") >= 4 or text.count(")") >= 4:
+        score -= 10
+
+    if text.count("{") >= 1 or text.count("}") >= 1:
+        score -= 10
+
+    # Penaliza frases com cara de menu/sidebar.
+    if looks_like_menu_dump(text):
+        score -= 30
+
+    # Penaliza frases muito fragmentadas.
+    word_count = len(text.split())
+
+    if word_count < 8:
+        score -= 15
+
+    # Pequeno bônus para docs oficiais, mas sem deixar lixo técnico passar.
+    if domain in {
+        "fastapi.tiangolo.com",
+        "pydantic.dev",
+        "docs.python.org",
+        "docs.sqlalchemy.org",
+        "react.dev",
+        "developer.mozilla.org",
+    }:
+        score += 5
+
+    return score
 
 def build_simple_summary(text: str, domain: str | None = None, max_items: int = 5) -> list[str]:
     blocks = [line.strip() for line in text.splitlines() if line.strip()]
@@ -652,6 +764,44 @@ def build_simple_summary(text: str, domain: str | None = None, max_items: int = 
 
     return selected
 
+def build_practical_summary(text: str, domain: str | None = None, max_items: int = 6) -> list[str]:
+    blocks = dedupe_blocks([
+        clean_block(block)
+        for block in re.split(r"\n+|(?<=[.!?])\s+", text)
+        if clean_block(block)
+    ])
+
+    scored_blocks = []
+
+    for block in blocks:
+        if not is_useful_block(block):
+            continue
+
+        score = score_practical_summary_block(block, domain)
+
+        if score <= 0:
+            continue
+
+        scored_blocks.append((score, block))
+
+    scored_blocks.sort(key=lambda item: item[0], reverse=True)
+
+    selected = []
+
+    for _, block in scored_blocks:
+        if block in selected:
+            continue
+
+        selected.append(block)
+
+        if len(selected) >= max_items:
+            break
+
+    if selected:
+        return selected
+
+    # Fallback: se o filtro ficou exigente demais, usa o resumo antigo.
+    return build_simple_summary(text, domain, max_items=max_items)
 
 def build_usefulness_notes(result: WebFetchResult) -> list[str]:
     domain = result.domain or ""
@@ -1157,7 +1307,7 @@ def build_search_and_summary_response(query: str, results: list[WebSearchResult]
 
         return response.strip()
 
-    summary_items = build_simple_summary(
+    summary_items = build_practical_summary(
         page_result.text or "",
         page_result.domain,
         max_items=6,
@@ -1235,7 +1385,7 @@ def build_technical_web_answer(query: str, results: list[WebSearchResult]) -> st
     expected_domains = get_expected_official_domains(query)
     is_expected_official_source = (best.domain or "").lower() in expected_domains
 
-    summary_items = build_simple_summary(
+    summary_items = build_practical_summary(
         page_result.text or "",
         page_result.domain,
         max_items=6,
