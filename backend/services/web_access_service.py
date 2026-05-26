@@ -1188,6 +1188,131 @@ def build_search_and_summary_response(query: str, results: list[WebSearchResult]
 
     return response.strip()
 
+def wants_technical_answer(message: str) -> bool:
+    text = message.lower().strip()
+
+    technical_triggers = [
+        "me explique",
+        "explique",
+        "explica",
+        "me ensine",
+        "ensine",
+        "como funciona",
+        "como usar",
+        "para que serve",
+        "o que é",
+        "o que e",
+        "resposta prática",
+        "resposta tecnica",
+        "resposta técnica",
+    ]
+
+    return any(trigger in text for trigger in technical_triggers)
+
+def build_technical_web_answer(query: str, results: list[WebSearchResult]) -> str:
+    if not results:
+        return build_web_search_response(query, results)
+
+    ranked_results = sorted(
+        results,
+        key=lambda item: score_search_result_for_summary(item, query),
+        reverse=True,
+    )
+
+    best = ranked_results[0]
+    page_result = fetch_page_text(best.url)
+
+    if not page_result.ok:
+        return (
+            "Pesquisei na web, achei uma fonte promissora, mas não consegui ler a página com segurança.\n\n"
+            f"Busca: `{query}`\n"
+            f"Fonte encontrada: **{best.title}**\n"
+            f"Domínio: `{best.domain or 'desconhecido'}`\n"
+            f"URL: `{best.url}`\n\n"
+            f"Motivo: {page_result.reason}"
+        )
+
+    expected_domains = get_expected_official_domains(query)
+    is_expected_official_source = (best.domain or "").lower() in expected_domains
+
+    summary_items = build_simple_summary(
+        page_result.text or "",
+        page_result.domain,
+        max_items=6,
+    )
+
+    source_note = "fonte oficial esperada" if is_expected_official_source else "melhor fonte encontrada"
+
+    response = (
+        "Pesquisei na web e montei uma resposta técnica com base na melhor fonte.\n\n"
+        f"Busca: `{query}`\n"
+        f"Fonte usada: **{best.title}**\n"
+        f"Tipo de fonte: {source_note}\n"
+        f"Domínio: `{best.domain or page_result.domain or 'desconhecido'}`\n"
+        f"URL: `{best.url}`\n\n"
+        "Resumo prático:\n"
+    )
+
+    for item in summary_items[:3]:
+        response += f"- {item}\n"
+
+    response += "\nPontos importantes:\n"
+
+    for item in summary_items[3:6]:
+        response += f"- {item}\n"
+
+    response += "\nComo isso pode se aplicar ao Helix:\n"
+    response += build_helix_application_notes(query)
+
+    response += "\nOutras fontes encontradas:\n"
+
+    for index, result in enumerate(ranked_results[1:4], start=1):
+        response += (
+            f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
+            f"   - URL: `{result.url}`\n"
+        )
+
+    return response.strip()
+
+def build_helix_application_notes(query: str) -> str:
+    query_lower = query.lower()
+
+    if "fastapi" in query_lower and ("router" in query_lower or "apirouter" in query_lower):
+        return (
+            "- Separar rotas do Helix em arquivos próprios deixa o backend mais organizado.\n"
+            "- `/chat` pode ficar em `chat_routes.py`.\n"
+            "- `/system` pode ficar em `system_routes.py`.\n"
+            "- `/apps` pode ficar em `app_registry_routes.py`.\n"
+            "- Futuramente, `/web/search` e `/web/read` poderiam ficar em `web_routes.py`.\n"
+        )
+
+    if "pydantic" in query_lower or "basemodel" in query_lower:
+        return (
+            "- Usar `BaseModel` ajuda a validar entradas dos endpoints do Helix.\n"
+            "- Com isso, comandos, mensagens, buscas web e configurações ficam mais previsíveis.\n"
+            "- Também melhora a documentação automática do FastAPI.\n"
+        )
+
+    if "pathlib" in query_lower:
+        return (
+            "- `pathlib` pode deixar os módulos de arquivos do Helix mais limpos.\n"
+            "- É útil para scanner de projetos, leitura de pastas, Obsidian Vault e manipulação segura de caminhos.\n"
+            "- Também reduz gambiarra com string de caminho no Windows. E isso, sinceramente, já é terapia.\n"
+        )
+
+    if "react" in query_lower and "hook" in query_lower:
+        return (
+            "- Hooks podem organizar estados do frontend do Helix, como chat, voz, orb, sistema e modo web.\n"
+            "- `useState` pode cuidar de estados simples.\n"
+            "- `useEffect` pode buscar status do backend e atualizar painéis.\n"
+            "- Hooks customizados podem separar lógica como `useHelixChat`, `useSystemStatus` e `useVoiceMode`.\n"
+        )
+
+    return (
+        "- Esse conteúdo pode servir como referência técnica para decisões futuras do Helix.\n"
+        "- O ideal é transformar o aprendizado em uma melhoria concreta no código, rota, serviço ou arquitetura.\n"
+    )
+
 def handle_web_access_intent(message: str) -> str | None:
     """
     Detecta pedidos simples de leitura de URL e pesquisa web.
@@ -1233,9 +1358,12 @@ def handle_web_access_intent(message: str) -> str | None:
         if not query:
             return "Entendi que você quer pesquisar na web, mas não achei o termo da busca."
 
-    results = fetch_web_search_results(query)
+        results = fetch_web_search_results(query)
 
-    if wants_search_and_summary(message):
-        return build_search_and_summary_response(query, results)
+        if wants_technical_answer(message):
+            return build_technical_web_answer(query, results)
 
-    return build_web_search_response(query, results)
+        if wants_search_and_summary(message):
+            return build_search_and_summary_response(query, results)
+
+        return build_web_search_response(query, results)
