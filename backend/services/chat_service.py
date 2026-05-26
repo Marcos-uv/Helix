@@ -96,6 +96,7 @@ from backend.services.social_response_service import (
 )
 
 from backend.services.personality_engine import build_personality_context
+from backend.services.web_advisor_service import build_web_project_advisor_response
 
 SYSTEM_PROMPT = """
 Você é Helix.
@@ -2529,6 +2530,23 @@ async def process_chat_logic(request, db: Session):
 
         return build_chat_response(result)
 
+    web_advisor_result = build_web_project_advisor_response(user_message)
+
+    if web_advisor_result:
+        _save_history(db, user.id, user_message, web_advisor_result)
+
+        try:
+            log_event_to_obsidian(
+                event="Web Advisor consultado pelo chat.",
+                context="/chat",
+                details="O usuário pediu pesquisa web com opinião aplicada ao projeto Helix.",
+                user_name=user_name,
+            )
+
+        except Exception as exc:
+            print(f"Erro ao registrar Web Advisor no Obsidian: {exc}")
+
+        return build_chat_response(web_advisor_result)
 
     web_access_result = handle_web_access_intent(user_message)
 
