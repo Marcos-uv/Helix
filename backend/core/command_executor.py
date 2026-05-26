@@ -11,6 +11,11 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import quote, quote_plus
 
+from sqlalchemy.orm import Session
+
+from backend.core.database import SessionLocal
+from backend.services.app_resolver_service import resolve_app_target
+
 
 OBSIDIAN_VAULT_PATH = Path(
     os.environ.get(
@@ -21,8 +26,10 @@ OBSIDIAN_VAULT_PATH = Path(
 OBSIDIAN_VAULT_NAME = os.environ.get("HELIX_OBSIDIAN_VAULT_NAME", "Helix Vault")
 OBSIDIAN_CONFIG_PATH = Path(os.environ.get("APPDATA", "")) / "obsidian" / "obsidian.json"
 
-# Fallback manual. A fonte principal para abrir apps agora é data/known_apps.json,
-# gerado pelo scanner. Este dicionário fica só para comandos especiais/sistema.
+# Fallback manual. A fonte principal para abrir apps agora é:
+# 1. app_resolver_service.py usando o banco
+# 2. data/known_apps.json, gerado pelo scanner
+# 3. PROGRAMS manual para comandos especiais/sistema
 PROGRAMS = {
     "notepad": {
         "path": "notepad.exe",
@@ -130,8 +137,10 @@ def _app_protocols_for_query(name: str, app: dict | None = None) -> list[str]:
     if app:
         lookup_values.add(normalize_app_lookup(app.get("name", "")))
         lookup_values.add(normalize_app_lookup(app.get("normalized_name", "")))
+
         for alias in app.get("aliases", []) or []:
             lookup_values.add(normalize_app_lookup(alias))
+
         process_name = app.get("process_name") or ""
         lookup_values.add(normalize_app_lookup(Path(process_name).stem))
 
@@ -189,15 +198,19 @@ def _unique_path(path: Path) -> Path:
         return path
 
     counter = 2
+
     while True:
         candidate = path.with_name(f"{path.stem} {counter}{path.suffix}")
+
         if not candidate.exists():
             return candidate
+
         counter += 1
 
 
 def _normalize_url(target: str) -> str | None:
     target = target.strip()
+
     if not target:
         return None
 
@@ -224,8 +237,10 @@ def _find_obsidian_note(note_name: str) -> Path | None:
             continue
 
         normalized_stem = _normalize_note_name(note_path.stem)
+
         if normalized_stem == normalized_name:
             return note_path
+
         if normalized_name in normalized_stem:
             candidates.append(note_path)
 
@@ -237,15 +252,19 @@ def _find_obsidian_note(note_name: str) -> Path | None:
 
 def _find_trashed_obsidian_note(note_name: str) -> Path | None:
     trash_dir = OBSIDIAN_VAULT_PATH / "_Lixeira"
+
     if not trash_dir.exists():
         return None
 
     normalized_name = _normalize_note_name(note_name)
     candidates = []
+
     for note_path in trash_dir.rglob("*.md"):
         normalized_stem = _normalize_note_name(note_path.stem)
+
         if normalized_stem == normalized_name:
             return note_path
+
         if normalized_name in normalized_stem:
             candidates.append(note_path)
 
@@ -282,8 +301,10 @@ def _list_obsidian_notes(exclude: Path | None = None) -> list[Path]:
     for note_path in OBSIDIAN_VAULT_PATH.rglob("*.md"):
         if exclude and note_path == exclude:
             continue
+
         if "_Lixeira" in note_path.relative_to(OBSIDIAN_VAULT_PATH).parts:
             continue
+
         notes.append(note_path)
 
     return sorted(notes, key=lambda path: path.stat().st_mtime, reverse=True)
@@ -301,23 +322,28 @@ def _append_obsidian_link(note_path: Path, linked_note_name: str) -> bool:
 
     content = content.rstrip() + f"\n- {link}\n"
     note_path.write_text(content, encoding="utf-8")
+
     return True
 
 
 def _auto_link_obsidian_note(note_path: Path) -> int:
     new_note_keywords = _note_keywords(note_path)
+
     if not new_note_keywords:
         return 0
 
     matches = []
+
     for candidate_path in OBSIDIAN_VAULT_PATH.rglob("*.md"):
         if candidate_path == note_path:
             continue
+
         if "_Lixeira" in candidate_path.relative_to(OBSIDIAN_VAULT_PATH).parts:
             continue
 
         shared_keywords = new_note_keywords & _note_keywords(candidate_path)
         strong_shared = shared_keywords & AUTO_LINK_STRONG_KEYWORDS
+
         if len(shared_keywords) >= AUTO_LINK_MIN_SHARED_KEYWORDS and strong_shared:
             matches.append((len(strong_shared), len(shared_keywords), candidate_path))
 
@@ -327,6 +353,7 @@ def _auto_link_obsidian_note(note_path: Path) -> int:
     for _, _, candidate_path in matches[:AUTO_LINK_MAX_NOTES]:
         source_changed = _append_obsidian_link(note_path, candidate_path.stem)
         destination_changed = _append_obsidian_link(candidate_path, note_path.stem)
+
         if source_changed or destination_changed:
             linked_count += 1
 
@@ -341,6 +368,7 @@ def _ensure_obsidian_vault_registered() -> None:
         return
 
     config = {"vaults": {}}
+
     if OBSIDIAN_CONFIG_PATH.exists():
         try:
             config = json.loads(OBSIDIAN_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -359,6 +387,7 @@ def _ensure_obsidian_vault_registered() -> None:
         "ts": int(time.time() * 1000),
         "open": True,
     }
+
     try:
         OBSIDIAN_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     except OSError:
@@ -373,6 +402,7 @@ def _open_obsidian_vault() -> None:
 def _open_obsidian_file(note_path: Path) -> None:
     _ensure_obsidian_vault_registered()
     relative_file = note_path.relative_to(OBSIDIAN_VAULT_PATH).with_suffix("").as_posix()
+
     webbrowser.open(
         f"obsidian://open?vault={quote(OBSIDIAN_VAULT_NAME, safe='')}&file={quote(relative_file, safe='')}"
     )
@@ -398,6 +428,7 @@ def _parse_obsidian_note(target: str) -> tuple[str, str]:
         f"Criado pelo Helix em {now:%Y-%m-%d %H:%M}.\n\n"
         f"{content}\n"
     )
+
     return title, markdown
 
 
@@ -407,12 +438,14 @@ def create_obsidian_markdown_note(title: str, markdown: str) -> Path:
 
     note_path = OBSIDIAN_VAULT_PATH / f"{title}.md"
     counter = 2
+
     while note_path.exists():
         note_path = OBSIDIAN_VAULT_PATH / f"{title} {counter}.md"
         counter += 1
 
     note_path.write_text(markdown, encoding="utf-8")
     _auto_link_obsidian_note(note_path)
+
     return note_path
 
 
@@ -424,6 +457,7 @@ def _create_obsidian_note(target: str) -> str:
     title, markdown = _parse_obsidian_note(target)
     note_path = create_obsidian_markdown_note(title, markdown)
     _open_obsidian_file(note_path)
+
     return f"Nota criada no Obsidian: {note_path.name}"
 
 
@@ -456,6 +490,7 @@ def _remove_obsidian_links_to_note(deleted_note_name: str, deleted_note_path: Pa
 
 def _delete_obsidian_note(note_name: str) -> str:
     note_path = _find_obsidian_note(note_name)
+
     if not note_path:
         return f"Nao encontrei a nota '{note_name}' no Helix Vault."
 
@@ -464,6 +499,7 @@ def _delete_obsidian_note(note_name: str) -> str:
     trash_dir.mkdir(parents=True, exist_ok=True)
     destination = _unique_path(trash_dir / note_path.name)
     note_path.rename(destination)
+
     return f"Nota movida para _Lixeira: {destination.name}. Links removidos em {removed_links_count} nota(s)."
 
 
@@ -476,24 +512,29 @@ def _format_obsidian_notes_list() -> str:
     note_names = "\n".join(f"- {note.stem}" for note in notes)
     total = len(_list_obsidian_notes())
     suffix = "" if total <= LIST_MAX_NOTES else f"\n...e mais {total - LIST_MAX_NOTES} nota(s)."
+
     return f"Notas no Helix Vault:\n{note_names}{suffix}"
 
 
 def _open_specific_obsidian_note(note_name: str) -> str:
     note_path = _find_obsidian_note(note_name)
+
     if not note_path:
         return f"Nao encontrei a nota '{note_name}' no Helix Vault."
 
     open_obsidian_note(note_path)
+
     return f"Abrindo nota: {note_path.stem}"
 
 
 def _read_obsidian_note(note_name: str) -> str:
     note_path = _find_obsidian_note(note_name)
+
     if not note_path:
         return f"Nao encontrei a nota '{note_name}' no Helix Vault."
 
     content = note_path.read_text(encoding="utf-8")
+
     if len(content) > READ_MAX_CHARS:
         content = content[:READ_MAX_CHARS].rstrip() + "\n\n...conteudo cortado."
 
@@ -502,11 +543,13 @@ def _read_obsidian_note(note_name: str) -> str:
 
 def _search_obsidian_notes(query: str) -> str:
     query = query.strip()
+
     if not query:
         return "Diga o que voce quer buscar nas notas."
 
     query_lower = query.lower()
     results = []
+
     for note_path in _list_obsidian_notes():
         try:
             content = note_path.read_text(encoding="utf-8")
@@ -514,15 +557,18 @@ def _search_obsidian_notes(query: str) -> str:
             continue
 
         haystack = f"{note_path.stem}\n{content}".lower()
+
         if query_lower not in haystack:
             continue
 
         lines = content.splitlines()
         snippet = ""
+
         for line in lines:
             if query_lower in line.lower():
                 snippet = line.strip()
                 break
+
         results.append((note_path.stem, snippet[:160]))
 
         if len(results) >= SEARCH_MAX_RESULTS:
@@ -535,6 +581,7 @@ def _search_obsidian_notes(query: str) -> str:
         f"- {name}" + (f": {snippet}" if snippet else "")
         for name, snippet in results
     )
+
     return f"Resultados para '{query}':\n{formatted_results}"
 
 
@@ -544,6 +591,7 @@ def _append_to_obsidian_note(target: str) -> str:
 
     note_name, content = [part.strip() for part in target.split("|", 1)]
     note_path = _find_obsidian_note(note_name)
+
     if not note_path:
         return f"Nao encontrei a nota '{note_name}' no Helix Vault."
 
@@ -553,11 +601,13 @@ def _append_to_obsidian_note(target: str) -> str:
     note_path.write_text(current_content.rstrip() + addition, encoding="utf-8")
     _auto_link_obsidian_note(note_path)
     open_obsidian_note(note_path)
+
     return f"Conteudo adicionado em: {note_path.name}"
 
 
 def _restore_obsidian_note(note_name: str) -> str:
     note_path = _find_trashed_obsidian_note(note_name)
+
     if not note_path:
         return f"Nao encontrei a nota '{note_name}' na _Lixeira."
 
@@ -565,6 +615,7 @@ def _restore_obsidian_note(note_name: str) -> str:
     note_path.rename(destination)
     _auto_link_obsidian_note(destination)
     open_obsidian_note(destination)
+
     return f"Nota restaurada: {destination.name}"
 
 
@@ -578,6 +629,7 @@ def _link_obsidian_notes(target: str) -> str:
 
     if not source_path:
         return f"Nao encontrei a nota '{source_name}' no Helix Vault."
+
     if not destination_path:
         return f"Nao encontrei a nota '{destination_name}' no Helix Vault."
 
@@ -616,15 +668,18 @@ def _rename_obsidian_note(target: str) -> str:
 
     old_name, new_name = [part.strip() for part in target.split("|", 1)]
     note_path = _find_obsidian_note(old_name)
+
     if not note_path:
         return f"Nao encontrei a nota '{old_name}' no Helix Vault."
 
     sanitized_new_name = _sanitize_filename(new_name)
     new_path = _unique_path(note_path.with_name(f"{sanitized_new_name}.md"))
     old_stem = note_path.stem
+
     note_path.rename(new_path)
     updated_count = _update_obsidian_links_after_rename(old_stem, new_path.stem, new_path)
     open_obsidian_note(new_path)
+
     return f"Nota renomeada para {new_path.name}. Links atualizados em {updated_count} nota(s)."
 
 
@@ -649,16 +704,18 @@ def _create_obsidian_hub(target: str) -> str:
     note_path.write_text(markdown, encoding="utf-8")
 
     linked_count = 0
+
     for related_note in related_notes:
         if _append_obsidian_link(related_note, note_path.stem):
             linked_count += 1
 
     open_obsidian_note(note_path)
+
     return f"Hub criado no Obsidian: {note_path.name} ({linked_count} notas ligadas)"
 
 
 # -----------------------------------------------------------------------------
-# Registro de aplicativos descobertos pelo scanner
+# Registro/cache de aplicativos descobertos pelo scanner
 # -----------------------------------------------------------------------------
 
 def normalize_app_lookup(value: str) -> str:
@@ -674,6 +731,7 @@ def normalize_app_lookup(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip()
 
     words = value.split()
+
     while words and words[0] in LEADING_TARGET_WORDS:
         words.pop(0)
 
@@ -686,8 +744,10 @@ def load_known_apps_cache() -> list[dict]:
 
     try:
         payload = json.loads(KNOWN_APPS_CACHE_PATH.read_text(encoding="utf-8"))
+
         if isinstance(payload, list):
             return payload
+
         return []
     except Exception as exc:
         print(f"Erro ao carregar known_apps.json: {exc}")
@@ -726,6 +786,7 @@ def find_known_app_in_cache(name: str) -> dict | None:
             continue
 
         exe_path = app.get("exe_path")
+
         if _is_bad_known_app_path(exe_path):
             continue
 
@@ -750,6 +811,7 @@ def find_known_app_in_cache(name: str) -> dict | None:
                 score = max(score, 75)
             else:
                 similarity = SequenceMatcher(None, query, candidate).ratio()
+
                 if similarity >= 0.82:
                     score = max(score, int(similarity * 100))
 
@@ -775,6 +837,141 @@ def find_known_app_in_cache(name: str) -> dict | None:
         return None
 
     return best_app
+
+
+# -----------------------------------------------------------------------------
+# Resolver inteligente de apps usando banco
+# -----------------------------------------------------------------------------
+
+def _known_app_model_to_dict(app) -> dict:
+    return {
+        "name": getattr(app, "name", None),
+        "normalized_name": getattr(app, "normalized_name", None),
+        "aliases": getattr(app, "aliases", None),
+        "exe_path": getattr(app, "exe_path", None),
+        "process_name": getattr(app, "process_name", None),
+        "source": getattr(app, "source", None),
+        "confidence": getattr(app, "confidence", None),
+        "is_active": getattr(app, "is_active", True),
+    }
+
+
+def open_resolved_app_from_db(name: str) -> str | None:
+    db: Session | None = None
+
+    try:
+        db = SessionLocal()
+        resolved = resolve_app_target(name, db)
+
+        if not resolved.found or not resolved.app:
+            return None
+
+        app = resolved.app
+
+        if resolved.requires_confirmation:
+            return (
+                f"Encontrei {app.name}, mas esse app precisa de confirmação antes de abrir. "
+                f"Motivo: confiança baixa, fonte sensível ou possível ambiguidade."
+            )
+
+        app_dict = _known_app_model_to_dict(app)
+        exe_path = app.exe_path
+        protocols = _app_protocols_for_query(name, app_dict)
+
+        # Protocolos primeiro para apps conhecidos que podem vir da Microsoft Store.
+        if protocols and _try_open_protocols(protocols):
+            return f"Abrindo {app.name} pelo protocolo do sistema..."
+
+        if not exe_path:
+            return f"Encontrei {app.name}, mas ele não tem caminho salvo para abrir."
+
+        path = Path(exe_path)
+
+        if not path.exists():
+            if protocols and _try_open_protocols(protocols):
+                return f"Abrindo {app.name} pelo protocolo do sistema..."
+
+            return f"Encontrei {app.name}, mas o caminho salvo não existe mais: {exe_path}"
+
+        errors = []
+
+        # Atalho do Menu Iniciar: abrir com shell do Windows.
+        if path.suffix.lower() == ".lnk":
+            try:
+                os.startfile(str(path))
+                return f"Abrindo {app.name}..."
+            except Exception as exc:
+                errors.append(str(exc))
+
+                if _open_via_cmd_start(str(path)):
+                    return f"Abrindo {app.name}..."
+
+        # Executável normal.
+        try:
+            subprocess.Popen([str(path)], shell=False)
+            return f"Abrindo {app.name}..."
+        except Exception as exc:
+            errors.append(str(exc))
+
+        # Fallback shell do Windows.
+        try:
+            os.startfile(str(path))
+            return f"Abrindo {app.name}..."
+        except Exception as exc:
+            errors.append(str(exc))
+
+        if _open_via_cmd_start(str(path)):
+            return f"Abrindo {app.name}..."
+
+        if protocols and _try_open_protocols(protocols):
+            return f"Abrindo {app.name} pelo protocolo do sistema..."
+
+        reason = errors[0] if errors else "erro desconhecido"
+
+        return f"Encontrei {app.name}, mas falhei ao abrir: {reason}"
+
+    except Exception as exc:
+        print(f"Erro no resolver de apps: {exc}")
+        return None
+
+    finally:
+        if db:
+            db.close()
+
+
+def close_resolved_app_from_db(name: str) -> str | None:
+    db: Session | None = None
+
+    try:
+        db = SessionLocal()
+        resolved = resolve_app_target(name, db)
+
+        if not resolved.found or not resolved.app:
+            return None
+
+        app = resolved.app
+        process_name = app.process_name
+
+        if not process_name:
+            exe_path = app.exe_path
+
+            if exe_path and Path(exe_path).suffix.lower() == ".exe":
+                process_name = Path(exe_path).name
+
+        if not process_name:
+            return f"Encontrei {app.name}, mas não sei o processo para fechar com segurança."
+
+        subprocess.call(["taskkill", "/IM", process_name, "/F"])
+
+        return f"Fechando {app.name}..."
+
+    except Exception as exc:
+        print(f"Erro ao fechar app pelo resolver: {exc}")
+        return None
+
+    finally:
+        if db:
+            db.close()
 
 
 def open_known_app_from_cache(name: str) -> str | None:
@@ -812,6 +1009,7 @@ def open_known_app_from_cache(name: str) -> str | None:
             return f"Abrindo {app.get('name')} pelo atalho do Menu Iniciar..."
         except Exception as exc:
             errors.append(str(exc))
+
             if _open_via_cmd_start(str(path)):
                 return f"Abrindo {app.get('name')} pelo atalho do Menu Iniciar..."
 
@@ -837,6 +1035,7 @@ def open_known_app_from_cache(name: str) -> str | None:
         return f"Abrindo {app.get('name')} pelo protocolo do sistema..."
 
     reason = errors[0] if errors else "erro desconhecido"
+
     return f"Encontrei {app.get('name')}, mas falhei ao abrir: {reason}"
 
 
@@ -850,6 +1049,7 @@ def close_known_app_from_cache(name: str) -> str | None:
 
     if not process_name:
         exe_path = app.get("exe_path")
+
         if exe_path and Path(exe_path).suffix.lower() == ".exe":
             process_name = Path(exe_path).name
 
@@ -857,6 +1057,7 @@ def close_known_app_from_cache(name: str) -> str | None:
         return f"Encontrei {app.get('name')}, mas não sei o nome do processo para fechar com segurança."
 
     subprocess.call(["taskkill", "/IM", process_name, "/F"])
+
     return f"Fechando {app.get('name')} pelo registro do Helix..."
 
 
@@ -874,6 +1075,7 @@ def _resolve_program_path(program: dict) -> str | None:
 
     if fallback_command:
         command_path = shutil.which(fallback_command)
+
         if command_path:
             return command_path
 
@@ -931,11 +1133,13 @@ def execute_command(action: str, target: str):
             return f"URL inválida: {target}"
 
         webbrowser.open(url)
+
         return f"Abrindo URL: {url}"
 
     if action == "search":
         url = f"https://www.google.com/search?q={quote_plus(target)}"
         webbrowser.open(url)
+
         return f"Pesquisando por '{target}'..."
 
     if action == "obsidian_note":
@@ -982,12 +1186,20 @@ def execute_command(action: str, target: str):
                 return f"Abrindo {site_name}..."
 
         url = _normalize_url(target)
+
         if url:
             webbrowser.open(url)
             return f"Abrindo {url}..."
 
-        # Fonte principal: aplicativos descobertos pelo scanner.
+        # Fonte principal: resolver inteligente usando banco.
+        resolved_app_result = open_resolved_app_from_db(clean_target)
+
+        if resolved_app_result:
+            return resolved_app_result
+
+        # Fallback antigo: cache JSON de aplicativos conhecidos.
         known_app_result = open_known_app_from_cache(clean_target)
+
         if known_app_result:
             return known_app_result
 
@@ -999,8 +1211,15 @@ def execute_command(action: str, target: str):
         return f"Não encontrei nenhum aplicativo salvo com o nome: {clean_target}"
 
     if action == "close":
-        # Primeiro tenta pelo registro descoberto pelo scanner.
+        # Primeiro tenta pelo resolver inteligente usando banco.
+        resolved_close_result = close_resolved_app_from_db(clean_target)
+
+        if resolved_close_result:
+            return resolved_close_result
+
+        # Fallback antigo: cache JSON.
         known_close_result = close_known_app_from_cache(clean_target)
+
         if known_close_result:
             return known_close_result
 
