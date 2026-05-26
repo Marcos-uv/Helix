@@ -5,16 +5,22 @@ import socket
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, unquote, urlparse
 from urllib.request import Request, urlopen
 
 
 # ============================================================
-# Helix Web Access Service - Fase 1.2
-# Acesso básico, somente leitura, com filtro melhor contra menu/sidebar.
+# Helix Web Access Service - Fase Web v4
+#
+# Recursos:
+# - Lê páginas permitidas em modo somente leitura.
+# - Pesquisa na web.
+# - Prioriza fontes oficiais por assunto.
+# - Resume melhor fonte.
+# - Monta resposta técnica aplicada ao Helix.
+# - Entrega payload estruturado para rotas /web.
 #
 # Regras:
-# - Lê páginas permitidas.
 # - Não baixa arquivos.
 # - Não instala nada.
 # - Não executa nada.
@@ -23,80 +29,11 @@ from urllib.request import Request, urlopen
 # ============================================================
 
 REQUEST_TIMEOUT_SECONDS = 8
-MAX_PAGE_BYTES = 700_000
-MAX_EXTRACTED_CHARS = 14_000
-
-MAX_SEARCH_RESULTS = 5
 SEARCH_TIMEOUT_SECONDS = 8
 
-SEARCH_RESULT_BLOCKED_DOMAINS = {
-    "duckduckgo.com",
-    "www.duckduckgo.com",
-}
-
-OFFICIAL_SOURCE_MAP = {
-    "fastapi": [
-        "fastapi.tiangolo.com",
-    ],
-    "pydantic": [
-        "pydantic.dev",
-    ],
-    "python": [
-        "docs.python.org",
-    ],
-    "sqlalchemy": [
-        "docs.sqlalchemy.org",
-    ],
-    "postgres": [
-        "www.postgresql.org",
-        "postgresql.org",
-    ],
-    "postgresql": [
-        "www.postgresql.org",
-        "postgresql.org",
-    ],
-    "javascript": [
-        "developer.mozilla.org",
-    ],
-    "html": [
-        "developer.mozilla.org",
-    ],
-    "css": [
-        "developer.mozilla.org",
-    ],
-    "mdn": [
-        "developer.mozilla.org",
-    ],
-    "react": [
-        "react.dev",
-    ],
-    "vite": [
-        "vite.dev",
-    ],
-    "tailwind": [
-        "tailwindcss.com",
-    ],
-    "github": [
-        "docs.github.com",
-        "github.com",
-    ],
-    "openai": [
-        "platform.openai.com",
-        "openai.com",
-    ],
-    "ollama": [
-        "ollama.com",
-    ],
-    "obsidian": [
-        "help.obsidian.md",
-    ],
-    "vscode": [
-        "code.visualstudio.com",
-    ],
-    "visual studio code": [
-        "code.visualstudio.com",
-    ],
-}
+MAX_PAGE_BYTES = 700_000
+MAX_EXTRACTED_CHARS = 14_000
+MAX_SEARCH_RESULTS = 5
 
 ALLOWED_DOMAINS = {
     # Docs / programação
@@ -178,6 +115,25 @@ NOISY_PHRASES = [
     "source code",
 ]
 
+MENU_KEYWORDS = [
+    "features",
+    "learn",
+    "reference",
+    "resources",
+    "about",
+    "release notes",
+    "path parameters",
+    "query parameters",
+    "request body",
+    "response model",
+    "middleware",
+    "security",
+    "deployment",
+    "testing",
+    "websockets",
+    "openapi",
+]
+
 PRACTICAL_SUMMARY_KEYWORDS = [
     "is used to",
     "used to",
@@ -233,31 +189,75 @@ TECHNICAL_NOISE_KEYWORDS = [
     "paragraph",
 ]
 
-MENU_KEYWORDS = [
-    "features",
-    "learn",
-    "reference",
-    "resources",
-    "about",
-    "release notes",
-    "path parameters",
-    "query parameters",
-    "request body",
-    "response model",
-    "middleware",
-    "security",
-    "deployment",
-    "testing",
-    "websockets",
-    "openapi",
-]
+SEARCH_RESULT_BLOCKED_DOMAINS = {
+    "duckduckgo.com",
+    "www.duckduckgo.com",
+}
 
-@dataclass
-class WebSearchResult:
-    title: str | None
-    url: str | None
-    snippet: str | None
-    domain: str | None
+OFFICIAL_SOURCE_MAP = {
+    "fastapi": [
+        "fastapi.tiangolo.com",
+    ],
+    "pydantic": [
+        "pydantic.dev",
+    ],
+    "python": [
+        "docs.python.org",
+    ],
+    "sqlalchemy": [
+        "docs.sqlalchemy.org",
+    ],
+    "postgres": [
+        "www.postgresql.org",
+        "postgresql.org",
+    ],
+    "postgresql": [
+        "www.postgresql.org",
+        "postgresql.org",
+    ],
+    "javascript": [
+        "developer.mozilla.org",
+    ],
+    "html": [
+        "developer.mozilla.org",
+    ],
+    "css": [
+        "developer.mozilla.org",
+    ],
+    "mdn": [
+        "developer.mozilla.org",
+    ],
+    "react": [
+        "react.dev",
+    ],
+    "vite": [
+        "vite.dev",
+    ],
+    "tailwind": [
+        "tailwindcss.com",
+    ],
+    "github": [
+        "docs.github.com",
+        "github.com",
+    ],
+    "openai": [
+        "platform.openai.com",
+        "openai.com",
+    ],
+    "ollama": [
+        "ollama.com",
+    ],
+    "obsidian": [
+        "help.obsidian.md",
+    ],
+    "vscode": [
+        "code.visualstudio.com",
+    ],
+    "visual studio code": [
+        "code.visualstudio.com",
+    ],
+}
+
 
 @dataclass
 class WebFetchResult:
@@ -271,6 +271,14 @@ class WebFetchResult:
     domain: str | None = None
     risk: str = "low"
     bytes_read: int = 0
+
+
+@dataclass
+class WebSearchResult:
+    title: str
+    url: str
+    snippet: str
+    domain: str | None = None
 
 
 class _TextExtractor(HTMLParser):
@@ -306,7 +314,6 @@ class _TextExtractor(HTMLParser):
             self._current_heading = tag
             self._heading_parts = []
 
-        # Captura blocos reais. Evita juntar a página inteira em uma frase só.
         if tag in {"p", "li", "h1", "h2", "h3", "h4", "blockquote"}:
             self._flush_block()
             self._current_block_tag = tag
@@ -330,8 +337,10 @@ class _TextExtractor(HTMLParser):
         if tag in {"h1", "h2", "h3"} and self._current_heading:
             heading = " ".join(" ".join(self._heading_parts).split()).strip()
             heading = clean_heading(heading)
+
             if heading and heading not in self.headings and not is_noise_line(heading):
                 self.headings.append(heading)
+
             self._current_heading = None
             self._heading_parts = []
 
@@ -340,6 +349,7 @@ class _TextExtractor(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         clean = " ".join(data.split())
+
         if not clean:
             return
 
@@ -376,479 +386,10 @@ class _TextExtractor(HTMLParser):
         return "\n".join(blocks)[:MAX_EXTRACTED_CHARS]
 
 
-def clean_heading(text: str) -> str:
-    text = text.replace("¶", "").strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def clean_block(text: str) -> str:
-    text = text.replace("¶", "").strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def is_noise_line(line: str) -> bool:
-    lowered = line.lower().strip()
-
-    if not lowered:
-        return True
-
-    if any(phrase in lowered for phrase in NOISY_PHRASES):
-        return True
-
-    # Linhas com troca de idiomas/navbar.
-    language_hits = sum(
-        token in lowered
-        for token in [
-            "english", "deutsch", "español", "français", "日本語",
-            "한국어", "português", "русский", "中文",
-        ]
-    )
-    if language_hits >= 2:
-        return True
-
-    return False
-
-
-def looks_like_menu_dump(line: str) -> bool:
-    lowered = line.lower()
-
-    menu_hits = sum(1 for keyword in MENU_KEYWORDS if keyword in lowered)
-
-    # Menu gigante da documentação costuma ter muitos termos e quase nenhuma pontuação normal.
-    if menu_hits >= 6 and len(line) > 350:
-        return True
-
-    if len(line) > 900:
-        return True
-
-    # Muitos "títulos" separados sem frase natural.
-    words = line.split()
-    if len(words) > 90 and line.count(".") <= 2:
-        return True
-
-    return False
-
-
-def is_useful_block(block: str) -> bool:
-    if not block:
-        return False
-
-    if is_noise_line(block):
-        return False
-
-    if looks_like_menu_dump(block):
-        return False
-
-    # Muito curto geralmente é menu ou título solto. Headings são tratados separado.
-    if len(block) < 35:
-        return False
-
-    # Linhas úteis costumam ter algum sinal de frase real.
-    has_sentence_signal = any(mark in block for mark in [".", ":", ";", "—", "-"])
-    has_technical_signal = any(
-        word in block.lower()
-        for word in [
-            "fastapi", "python", "framework", "api", "documentation",
-            "install", "example", "openapi", "pydantic", "database",
-            "async", "security", "deployment", "model", "dataset",
-            "postgresql", "sqlalchemy", "obsidian", "github",
-        ]
-    )
-
-    if not has_sentence_signal and not has_technical_signal:
-        return False
-
-    return True
-
-
-def dedupe_blocks(blocks: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-
-    for block in blocks:
-        normalized = re.sub(r"\W+", " ", block.lower()).strip()
-        if normalized in seen:
-            continue
-
-        # Evita blocos muito parecidos contendo blocos já salvos.
-        if any(normalized and normalized in old for old in seen):
-            continue
-
-        seen.add(normalized)
-        result.append(block)
-
-    return result
-
-
-def normalize_domain(domain: str) -> str:
-    domain = domain.lower().strip()
-    if domain.startswith("www."):
-        return domain[4:]
-    return domain
-
-
-def get_domain(url: str) -> str | None:
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            return None
-        if not parsed.netloc:
-            return None
-        return normalize_domain(parsed.netloc)
-    except Exception:
-        return None
-
-
-def is_domain_allowed(url: str) -> bool:
-    domain = get_domain(url)
-    if not domain:
-        return False
-
-    allowed_normalized = {normalize_domain(item) for item in ALLOWED_DOMAINS}
-
-    if domain in allowed_normalized:
-        return True
-
-    for allowed in allowed_normalized:
-        if domain.endswith("." + allowed):
-            return True
-
-    return False
-
-
-def classify_url_risk(url: str) -> dict[str, Any]:
-    parsed = urlparse(url)
-    path = parsed.path.lower()
-    lowered_url = url.lower()
-
-    extension_risk = any(path.endswith(ext) for ext in BLOCKED_EXTENSIONS)
-    sensitive_risk = any(keyword in lowered_url for keyword in SENSITIVE_KEYWORDS)
-
-    if extension_risk:
-        return {
-            "risk": "blocked",
-            "reason": "A URL parece apontar para download/arquivo executável ou compactado.",
-        }
-
-    if sensitive_risk:
-        return {
-            "risk": "medium",
-            "reason": "A URL parece envolver login, senha, token, pagamento ou área sensível.",
-        }
-
-    if not is_domain_allowed(url):
-        return {
-            "risk": "blocked",
-            "reason": "Domínio não está na lista de leitura permitida do Helix.",
-        }
-
-    return {
-        "risk": "low",
-        "reason": "URL permitida para leitura básica.",
-    }
-
-
-def extract_url_from_message(message: str) -> str | None:
-    match = re.search(r"https?://[^\s)>\]]+", message)
-    if match:
-        return match.group(0).strip().rstrip(".,;")
-    return None
-
-
-def fetch_page_text(url: str) -> WebFetchResult:
-    risk_info = classify_url_risk(url)
-    domain = get_domain(url)
-
-    if risk_info["risk"] == "blocked":
-        return WebFetchResult(
-            ok=False,
-            url=url,
-            domain=domain,
-            risk="blocked",
-            reason=risk_info["reason"],
-        )
-
-    try:
-        socket.setdefaulttimeout(REQUEST_TIMEOUT_SECONDS)
-
-        request = Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "HelixLocalAssistant/0.1 "
-                    "(read-only research; local personal assistant)"
-                ),
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
-            },
-            method="GET",
-        )
-
-        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            content_type = response.headers.get("Content-Type", "")
-
-            if "text/html" not in content_type and "text/plain" not in content_type:
-                return WebFetchResult(
-                    ok=False,
-                    url=url,
-                    domain=domain,
-                    risk=risk_info["risk"],
-                    reason=f"Tipo de conteúdo não permitido para leitura básica: {content_type}",
-                )
-
-            raw = response.read(MAX_PAGE_BYTES + 1)
-
-        if len(raw) > MAX_PAGE_BYTES:
-            raw = raw[:MAX_PAGE_BYTES]
-
-        html = raw.decode("utf-8", errors="replace")
-
-        parser = _TextExtractor()
-        parser.feed(html)
-
-        text = parser.get_text()
-        headings = [
-            h for h in parser.headings
-            if 3 <= len(h) <= 100 and not is_noise_line(h)
-        ][:10]
-        links = list(dict.fromkeys(parser.links))[:8]
-
-        if not text:
-            return WebFetchResult(
-                ok=False,
-                url=url,
-                domain=domain,
-                risk=risk_info["risk"],
-                bytes_read=len(raw),
-                reason="A página foi acessada, mas não consegui extrair texto útil depois dos filtros.",
-            )
-
-        return WebFetchResult(
-            ok=True,
-            url=url,
-            domain=domain,
-            title=parser.title,
-            text=text,
-            headings=headings,
-            links=links,
-            risk=risk_info["risk"],
-            bytes_read=len(raw),
-            reason=risk_info["reason"],
-        )
-
-    except Exception as exc:
-        return WebFetchResult(
-            ok=False,
-            url=url,
-            domain=domain,
-            risk=risk_info["risk"],
-            reason=f"Erro ao acessar página: {type(exc).__name__}: {exc}",
-        )
-
-
-def score_block(block: str, domain: str | None) -> int:
-    lowered = block.lower()
-    score = 0
-
-    strong_keywords = [
-        "fastapi", "python", "framework", "api", "openapi", "type hints",
-        "pydantic", "async", "database", "sqlalchemy", "postgresql",
-        "security", "deployment", "testing", "model", "dataset", "agent",
-        "memory", "rag", "obsidian", "github",
-    ]
-
-    for keyword in strong_keywords:
-        if keyword in lowered:
-            score += 3
-
-    # Prioriza blocos com cara de explicação.
-    if 80 <= len(block) <= 420:
-        score += 3
-    elif len(block) > 700:
-        score -= 4
-
-    if "." in block:
-        score += 1
-
-    if ":" in block:
-        score += 1
-
-    # Penaliza índice/menu residual.
-    if looks_like_menu_dump(block):
-        score -= 10
-
-    if any(phrase in lowered for phrase in NOISY_PHRASES):
-        score -= 8
-
-    return score
-
-def score_practical_summary_block(block: str, domain: str | None = None) -> int:
-    text = block.lower().strip()
-    score = 0
-
-    if not text:
-        return -999
-
-    # Tamanho ideal: nem migalha, nem testamento.
-    length = len(text)
-
-    if 80 <= length <= 420:
-        score += 20
-    elif 40 <= length < 80:
-        score += 8
-    elif length > 650:
-        score -= 20
-
-    for keyword in PRACTICAL_SUMMARY_KEYWORDS:
-        if keyword in text:
-            score += 8
-
-    for keyword in TECHNICAL_NOISE_KEYWORDS:
-        if keyword in text:
-            score -= 18
-
-    # Frases com muitos símbolos internos costumam ser API interna, não explicação.
-    if text.count("__") >= 1:
-        score -= 35
-
-    if text.count("(") >= 4 or text.count(")") >= 4:
-        score -= 10
-
-    if text.count("{") >= 1 or text.count("}") >= 1:
-        score -= 10
-
-    # Penaliza frases com cara de menu/sidebar.
-    if looks_like_menu_dump(text):
-        score -= 30
-
-    # Penaliza frases muito fragmentadas.
-    word_count = len(text.split())
-
-    if word_count < 8:
-        score -= 15
-
-    # Pequeno bônus para docs oficiais, mas sem deixar lixo técnico passar.
-    if domain in {
-        "fastapi.tiangolo.com",
-        "pydantic.dev",
-        "docs.python.org",
-        "docs.sqlalchemy.org",
-        "react.dev",
-        "developer.mozilla.org",
-    }:
-        score += 5
-
-    return score
-
-def build_simple_summary(text: str, domain: str | None = None, max_items: int = 5) -> list[str]:
-    blocks = [line.strip() for line in text.splitlines() if line.strip()]
-    blocks = [block for block in blocks if is_useful_block(block)]
-
-    if not blocks:
-        return ["Consegui acessar a página, mas os filtros não encontraram parágrafos claros para resumir."]
-
-    ranked = sorted(blocks, key=lambda item: score_block(item, domain), reverse=True)
-
-    selected: list[str] = []
-    for block in ranked:
-        # Evita bloco longo demais na resposta.
-        if len(block) > 420:
-            block = block[:420].rsplit(" ", 1)[0].strip() + "..."
-
-        if block not in selected:
-            selected.append(block)
-
-        if len(selected) >= max_items:
-            break
-
-    return selected
-
-def build_practical_summary(text: str, domain: str | None = None, max_items: int = 6) -> list[str]:
-    blocks = dedupe_blocks([
-        clean_block(block)
-        for block in re.split(r"\n+|(?<=[.!?])\s+", text)
-        if clean_block(block)
-    ])
-
-    scored_blocks = []
-
-    for block in blocks:
-        if not is_useful_block(block):
-            continue
-
-        score = score_practical_summary_block(block, domain)
-
-        if score <= 0:
-            continue
-
-        scored_blocks.append((score, block))
-
-    scored_blocks.sort(key=lambda item: item[0], reverse=True)
-
-    selected = []
-
-    for _, block in scored_blocks:
-        if block in selected:
-            continue
-
-        selected.append(block)
-
-        if len(selected) >= max_items:
-            break
-
-    if selected:
-        return selected
-
-    # Fallback: se o filtro ficou exigente demais, usa o resumo antigo.
-    return build_simple_summary(text, domain, max_items=max_items)
-
-def build_usefulness_notes(result: WebFetchResult) -> list[str]:
-    domain = result.domain or ""
-    text = (result.text or "").lower()
-    notes: list[str] = []
-
-    if "fastapi" in domain or "fastapi" in text:
-        notes.extend([
-            "Revisar a organização de rotas e separar melhor endpoints em routers.",
-            "Verificar uso correto de Pydantic, CORS, lifespan, testes e deploy.",
-            "Usar a documentação como referência para melhorar `/chat`, `/tts`, `/system` e futuros endpoints.",
-        ])
-
-    if "sqlalchemy" in domain or "sqlalchemy" in text:
-        notes.extend([
-            "Melhorar a camada de banco, sessões, queries e models do PostgreSQL.",
-        ])
-
-    if "postgresql" in domain or "postgresql" in text:
-        notes.extend([
-            "Pesquisar otimização, backup, índices e estrutura da memória do Helix.",
-        ])
-
-    if "huggingface" in domain or "model" in text or "dataset" in text:
-        notes.extend([
-            "Catalogar modelos, datasets e ideias de IA sem baixar nada automaticamente.",
-        ])
-
-    if "obsidian" in domain or "obsidian" in text:
-        notes.extend([
-            "Melhorar a integração com o Helix Brain e organização das notas.",
-        ])
-
-    if "github.com" in domain:
-        notes.extend([
-            "Ler README, issues e exemplos de implementação sem clonar ou executar código.",
-        ])
-
-    if not notes:
-        notes.append("Usar como fonte de consulta, mas validar antes de transformar em decisão no projeto.")
-
-    return list(dict.fromkeys(notes))[:4]
-
-
 class DuckDuckGoHTMLSearchParser(HTMLParser):
     def __init__(self):
         super().__init__()
+
         self.results: list[WebSearchResult] = []
 
         self._inside_result_link = False
@@ -918,17 +459,492 @@ class DuckDuckGoHTMLSearchParser(HTMLParser):
         if url.startswith("//"):
             url = "https:" + url
 
+        if url.startswith("/l/?"):
+            url = "https://duckduckgo.com" + url
+
         if "duckduckgo.com/l/?" in url and "uddg=" in url:
             parsed = urlparse(url)
             query_parts = parsed.query.split("&")
 
             for part in query_parts:
                 if part.startswith("uddg="):
-                    from urllib.parse import unquote
-
                     return unquote(part.replace("uddg=", "", 1))
 
         return url
+
+
+def clean_heading(text: str) -> str:
+    text = text.replace("¶", "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def clean_block(text: str) -> str:
+    text = text.replace("¶", "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def is_noise_line(line: str) -> bool:
+    lowered = line.lower().strip()
+
+    if not lowered:
+        return True
+
+    if any(phrase in lowered for phrase in NOISY_PHRASES):
+        return True
+
+    language_hits = sum(
+        token in lowered
+        for token in [
+            "english", "deutsch", "español", "français", "日本語",
+            "한국어", "português", "русский", "中文",
+        ]
+    )
+
+    if language_hits >= 2:
+        return True
+
+    return False
+
+
+def looks_like_menu_dump(line: str) -> bool:
+    lowered = line.lower()
+    menu_hits = sum(1 for keyword in MENU_KEYWORDS if keyword in lowered)
+
+    if menu_hits >= 6 and len(line) > 350:
+        return True
+
+    if len(line) > 900:
+        return True
+
+    words = line.split()
+
+    if len(words) > 90 and line.count(".") <= 2:
+        return True
+
+    return False
+
+
+def is_useful_block(block: str) -> bool:
+    if not block:
+        return False
+
+    if is_noise_line(block):
+        return False
+
+    if looks_like_menu_dump(block):
+        return False
+
+    if len(block) < 35:
+        return False
+
+    has_sentence_signal = any(mark in block for mark in [".", ":", ";", "—", "-"])
+    has_technical_signal = any(
+        word in block.lower()
+        for word in [
+            "fastapi", "python", "framework", "api", "documentation",
+            "install", "example", "openapi", "pydantic", "database",
+            "async", "security", "deployment", "model", "dataset",
+            "postgresql", "sqlalchemy", "obsidian", "github", "react",
+            "hook", "router", "validation", "request", "response",
+        ]
+    )
+
+    if not has_sentence_signal and not has_technical_signal:
+        return False
+
+    return True
+
+
+def dedupe_blocks(blocks: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for block in blocks:
+        normalized = re.sub(r"\W+", " ", block.lower()).strip()
+
+        if normalized in seen:
+            continue
+
+        if any(normalized and normalized in old for old in seen):
+            continue
+
+        seen.add(normalized)
+        result.append(block)
+
+    return result
+
+
+def normalize_domain(domain: str) -> str:
+    domain = domain.lower().strip()
+
+    if domain.startswith("www."):
+        return domain[4:]
+
+    return domain
+
+
+def get_domain(url: str) -> str | None:
+    try:
+        parsed = urlparse(url)
+
+        if parsed.scheme not in {"http", "https"}:
+            return None
+
+        if not parsed.netloc:
+            return None
+
+        return normalize_domain(parsed.netloc)
+
+    except Exception:
+        return None
+
+
+def is_domain_allowed(url: str) -> bool:
+    domain = get_domain(url)
+
+    if not domain:
+        return False
+
+    allowed_normalized = {normalize_domain(item) for item in ALLOWED_DOMAINS}
+
+    if domain in allowed_normalized:
+        return True
+
+    for allowed in allowed_normalized:
+        if domain.endswith("." + allowed):
+            return True
+
+    return False
+
+
+def classify_url_risk(url: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    lowered_url = url.lower()
+
+    extension_risk = any(path.endswith(ext) for ext in BLOCKED_EXTENSIONS)
+    sensitive_risk = any(keyword in lowered_url for keyword in SENSITIVE_KEYWORDS)
+
+    if extension_risk:
+        return {
+            "risk": "blocked",
+            "reason": "A URL parece apontar para download/arquivo executável ou compactado.",
+        }
+
+    if sensitive_risk:
+        return {
+            "risk": "medium",
+            "reason": "A URL parece envolver login, senha, token, pagamento ou área sensível.",
+        }
+
+    if not is_domain_allowed(url):
+        return {
+            "risk": "blocked",
+            "reason": "Domínio não está na lista de leitura permitida do Helix.",
+        }
+
+    return {
+        "risk": "low",
+        "reason": "URL permitida para leitura básica.",
+    }
+
+
+def extract_url_from_message(message: str) -> str | None:
+    match = re.search(r"https?://[^\s)>\]]+", message)
+
+    if match:
+        return match.group(0).strip().rstrip(".,;")
+
+    return None
+
+
+def fetch_page_text(url: str) -> WebFetchResult:
+    risk_info = classify_url_risk(url)
+    domain = get_domain(url)
+
+    if risk_info["risk"] == "blocked":
+        return WebFetchResult(
+            ok=False,
+            url=url,
+            domain=domain,
+            risk="blocked",
+            reason=risk_info["reason"],
+        )
+
+    try:
+        socket.setdefaulttimeout(REQUEST_TIMEOUT_SECONDS)
+
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "HelixLocalAssistant/0.1 "
+                    "(read-only research; local personal assistant)"
+                ),
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+            },
+            method="GET",
+        )
+
+        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            content_type = response.headers.get("Content-Type", "")
+
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                return WebFetchResult(
+                    ok=False,
+                    url=url,
+                    domain=domain,
+                    risk=risk_info["risk"],
+                    reason=f"Tipo de conteúdo não permitido para leitura básica: {content_type}",
+                )
+
+            raw = response.read(MAX_PAGE_BYTES + 1)
+
+        if len(raw) > MAX_PAGE_BYTES:
+            raw = raw[:MAX_PAGE_BYTES]
+
+        html = raw.decode("utf-8", errors="replace")
+
+        parser = _TextExtractor()
+        parser.feed(html)
+
+        text = parser.get_text()
+        headings = [
+            heading for heading in parser.headings
+            if 3 <= len(heading) <= 100 and not is_noise_line(heading)
+        ][:10]
+        links = list(dict.fromkeys(parser.links))[:8]
+
+        if not text:
+            return WebFetchResult(
+                ok=False,
+                url=url,
+                domain=domain,
+                risk=risk_info["risk"],
+                bytes_read=len(raw),
+                reason="A página foi acessada, mas não consegui extrair texto útil depois dos filtros.",
+            )
+
+        return WebFetchResult(
+            ok=True,
+            url=url,
+            domain=domain,
+            title=parser.title,
+            text=text,
+            headings=headings,
+            links=links,
+            risk=risk_info["risk"],
+            bytes_read=len(raw),
+            reason=risk_info["reason"],
+        )
+
+    except Exception as exc:
+        return WebFetchResult(
+            ok=False,
+            url=url,
+            domain=domain,
+            risk=risk_info["risk"],
+            reason=f"Erro ao acessar página: {type(exc).__name__}: {exc}",
+        )
+
+
+def score_block(block: str, domain: str | None) -> int:
+    lowered = block.lower()
+    score = 0
+
+    strong_keywords = [
+        "fastapi", "python", "framework", "api", "openapi", "type hints",
+        "pydantic", "async", "database", "sqlalchemy", "postgresql",
+        "security", "deployment", "testing", "model", "dataset", "agent",
+        "memory", "rag", "obsidian", "github", "react", "hook",
+        "router", "validation", "request", "response",
+    ]
+
+    for keyword in strong_keywords:
+        if keyword in lowered:
+            score += 3
+
+    if 80 <= len(block) <= 420:
+        score += 3
+    elif len(block) > 700:
+        score -= 4
+
+    if "." in block:
+        score += 1
+
+    if ":" in block:
+        score += 1
+
+    if looks_like_menu_dump(block):
+        score -= 10
+
+    if any(phrase in lowered for phrase in NOISY_PHRASES):
+        score -= 8
+
+    return score
+
+
+def score_practical_summary_block(block: str, domain: str | None = None) -> int:
+    text = block.lower().strip()
+    score = 0
+
+    if not text:
+        return -999
+
+    length = len(text)
+
+    if 80 <= length <= 420:
+        score += 20
+    elif 40 <= length < 80:
+        score += 8
+    elif length > 650:
+        score -= 20
+
+    for keyword in PRACTICAL_SUMMARY_KEYWORDS:
+        if keyword in text:
+            score += 8
+
+    for keyword in TECHNICAL_NOISE_KEYWORDS:
+        if keyword in text:
+            score -= 18
+
+    if text.count("__") >= 1:
+        score -= 35
+
+    if text.count("(") >= 4 or text.count(")") >= 4:
+        score -= 10
+
+    if text.count("{") >= 1 or text.count("}") >= 1:
+        score -= 10
+
+    if looks_like_menu_dump(text):
+        score -= 30
+
+    word_count = len(text.split())
+
+    if word_count < 8:
+        score -= 15
+
+    if domain in {
+        "fastapi.tiangolo.com",
+        "pydantic.dev",
+        "docs.python.org",
+        "docs.sqlalchemy.org",
+        "react.dev",
+        "developer.mozilla.org",
+    }:
+        score += 5
+
+    return score
+
+
+def build_simple_summary(text: str, domain: str | None = None, max_items: int = 5) -> list[str]:
+    blocks = [line.strip() for line in text.splitlines() if line.strip()]
+    blocks = [block for block in blocks if is_useful_block(block)]
+
+    if not blocks:
+        return ["Consegui acessar a página, mas os filtros não encontraram parágrafos claros para resumir."]
+
+    ranked = sorted(blocks, key=lambda item: score_block(item, domain), reverse=True)
+
+    selected: list[str] = []
+
+    for block in ranked:
+        if len(block) > 420:
+            block = block[:420].rsplit(" ", 1)[0].strip() + "..."
+
+        if block not in selected:
+            selected.append(block)
+
+        if len(selected) >= max_items:
+            break
+
+    return selected
+
+
+def build_practical_summary(text: str, domain: str | None = None, max_items: int = 6) -> list[str]:
+    blocks = dedupe_blocks([
+        clean_block(block)
+        for block in re.split(r"\n+|(?<=[.!?])\s+", text)
+        if clean_block(block)
+    ])
+
+    scored_blocks: list[tuple[int, str]] = []
+
+    for block in blocks:
+        if not is_useful_block(block):
+            continue
+
+        score = score_practical_summary_block(block, domain)
+
+        if score <= 0:
+            continue
+
+        scored_blocks.append((score, block))
+
+    scored_blocks.sort(key=lambda item: item[0], reverse=True)
+
+    selected: list[str] = []
+
+    for _, block in scored_blocks:
+        if block in selected:
+            continue
+
+        selected.append(block)
+
+        if len(selected) >= max_items:
+            break
+
+    if selected:
+        return selected
+
+    return build_simple_summary(text, domain, max_items=max_items)
+
+
+def build_usefulness_notes(result: WebFetchResult) -> list[str]:
+    domain = result.domain or ""
+    text = (result.text or "").lower()
+    notes: list[str] = []
+
+    if "fastapi" in domain or "fastapi" in text:
+        notes.extend([
+            "Revisar a organização de rotas e separar melhor endpoints em routers.",
+            "Verificar uso correto de Pydantic, CORS, lifespan, testes e deploy.",
+            "Usar a documentação como referência para melhorar `/chat`, `/tts`, `/system` e futuros endpoints.",
+        ])
+
+    if "sqlalchemy" in domain or "sqlalchemy" in text:
+        notes.extend([
+            "Melhorar a camada de banco, sessões, queries e models do PostgreSQL.",
+        ])
+
+    if "postgresql" in domain or "postgresql" in text:
+        notes.extend([
+            "Pesquisar otimização, backup, índices e estrutura da memória do Helix.",
+        ])
+
+    if "huggingface" in domain or "model" in text or "dataset" in text:
+        notes.extend([
+            "Catalogar modelos, datasets e ideias de IA sem baixar nada automaticamente.",
+        ])
+
+    if "obsidian" in domain or "obsidian" in text:
+        notes.extend([
+            "Melhorar a integração com o Helix Brain e organização das notas.",
+        ])
+
+    if "github.com" in domain:
+        notes.extend([
+            "Ler README, issues e exemplos de implementação sem clonar ou executar código.",
+        ])
+
+    if not notes:
+        notes.append("Usar como fonte de consulta, mas validar antes de transformar em decisão no projeto.")
+
+    return list(dict.fromkeys(notes))[:4]
+
 
 def is_web_search_intent(message: str) -> bool:
     text = message.lower().strip()
@@ -955,6 +971,7 @@ def is_web_search_intent(message: str) -> bool:
 
     return any(trigger in text for trigger in search_triggers)
 
+
 def clean_search_query(query: str) -> str:
     query = query.strip()
 
@@ -979,6 +996,7 @@ def clean_search_query(query: str) -> str:
     query = re.sub(r"[?.!]+$", "", query).strip()
 
     return query
+
 
 def extract_search_query(message: str) -> str:
     text = message.strip()
@@ -1048,8 +1066,8 @@ def fetch_web_search_results(query: str) -> list[WebSearchResult]:
     parser = DuckDuckGoHTMLSearchParser()
     parser.feed(html)
 
-    unique_results = []
-    seen_urls = set()
+    unique_results: list[WebSearchResult] = []
+    seen_urls: set[str] = set()
 
     for result in parser.results:
         if not result.url or result.url in seen_urls:
@@ -1063,110 +1081,6 @@ def fetch_web_search_results(query: str) -> list[WebSearchResult]:
 
     return unique_results
 
-def build_web_page_response(result: WebFetchResult) -> str:
-    if not result.ok:
-        return (
-            "Não consegui acessar essa página com segurança.\n\n"
-            f"URL: `{result.url}`\n"
-            f"Domínio: `{result.domain or 'desconhecido'}`\n"
-            f"Risco: `{result.risk}`\n"
-            f"Motivo: {result.reason}"
-        )
-
-    title = result.title or "sem título detectado"
-    text = result.text or ""
-    headings = result.headings or []
-
-    summary_items = build_simple_summary(text, result.domain, max_items=5)
-    usefulness_notes = build_usefulness_notes(result)
-
-    response = (
-        "Acessei a página em modo somente leitura.\n\n"
-        f"URL: `{result.url}`\n"
-        f"Domínio: `{result.domain}`\n"
-        f"Título: {title}\n"
-        f"Bytes lidos: {result.bytes_read}\n\n"
-    )
-
-    if headings:
-        response += "Seções úteis detectadas:\n"
-        for heading in headings[:6]:
-            response += f"- {heading}\n"
-        response += "\n"
-
-    response += "Resumo limpo:\n"
-    for item in summary_items:
-        response += f"- {item}\n"
-
-    response += "\nPossível utilidade para o Helix:\n"
-    for note in usefulness_notes:
-        response += f"- {note}\n"
-
-
-    return response
-
-def build_web_search_response(query: str, results: list[WebSearchResult]) -> str:
-    if not results:
-        return (
-            "Não encontrei resultados úteis para essa pesquisa.\n\n"
-            f"Busca: `{query}`\n\n"
-            "Pode ser bloqueio do mecanismo de busca, termo muito genérico ou o HTML da busca mudou. "
-            "A internet sendo a internet: uma bagunça com protocolo."
-        )
-
-    response = (
-        "Pesquisei na web e encontrei estes resultados:\n\n"
-        f"Busca: `{query}`\n\n"
-    )
-
-    for index, result in enumerate(results, start=1):
-        response += f"{index}. **{result.title}**\n"
-        response += f"   - Domínio: `{result.domain or 'desconhecido'}`\n"
-        response += f"   - URL: `{result.url}`\n"
-
-        if result.snippet:
-            response += f"   - Resumo: {result.snippet}\n"
-
-        response += "\n"
-
-    response += (
-        "Posso ler/resumir um desses links depois, se você mandar a URL específica."
-    )
-
-    return response.strip()
-
-def wants_search_and_summary(message: str) -> bool:
-    lowered = message.lower()
-
-    search_and_summary_triggers = [
-        "pesquise e resuma",
-        "pesquisar e resumir",
-        "procure e resuma",
-        "procurar e resumir",
-        "busque e resuma",
-        "buscar e resumir",
-        "pesquise na internet e resuma",
-        "pesquisar na internet e resumir",
-        "procure na internet e resuma",
-        "procurar na internet e resumir",
-        "busque na internet e resuma",
-        "buscar na internet e resumir",
-        "e resuma",
-        "e resume",
-        "e leia",
-        "e ler",
-        "resuma a melhor fonte",
-        "resuma o melhor resultado",
-        "leia a melhor fonte",
-        "leia o melhor resultado",
-        "resuma a fonte oficial",
-        "resuma automaticamente",
-        "me dê um resumo",
-        "me de um resumo",
-        "traz pra mim um resumo",
-    ]
-
-    return any(trigger in lowered for trigger in search_and_summary_triggers)
 
 def get_expected_official_domains(query: str) -> list[str]:
     query_lower = query.lower()
@@ -1176,17 +1090,20 @@ def get_expected_official_domains(query: str) -> list[str]:
         if keyword in query_lower:
             expected_domains.extend(domains)
 
-    unique_domains = []
-    seen = set()
+    unique_domains: list[str] = []
+    seen: set[str] = set()
 
     for domain in expected_domains:
-        if domain in seen:
+        normalized = normalize_domain(domain)
+
+        if normalized in seen:
             continue
 
-        seen.add(domain)
-        unique_domains.append(domain)
+        seen.add(normalized)
+        unique_domains.append(normalized)
 
     return unique_domains
+
 
 def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
     score = 0
@@ -1204,7 +1121,6 @@ def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
         "pydantic.dev",
         "docs.python.org",
         "docs.sqlalchemy.org",
-        "www.postgresql.org",
         "postgresql.org",
         "developer.mozilla.org",
         "react.dev",
@@ -1270,6 +1186,7 @@ def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
 
     return score
 
+
 def web_search_result_to_dict(result: WebSearchResult) -> dict[str, Any]:
     return {
         "title": result.title,
@@ -1294,6 +1211,285 @@ def get_source_type(query: str, domain: str | None) -> str:
         return "fonte oficial esperada"
 
     return "melhor fonte encontrada"
+
+
+def wants_search_and_summary(message: str) -> bool:
+    text = message.lower().strip()
+
+    summary_triggers = [
+        "e resuma",
+        "e resume",
+        "e leia",
+        "e ler",
+        "resuma a melhor fonte",
+        "resuma o melhor resultado",
+        "leia a melhor fonte",
+        "leia o melhor resultado",
+        "resuma a fonte oficial",
+        "resuma automaticamente",
+        "me dê um resumo",
+        "me de um resumo",
+    ]
+
+    return any(trigger in text for trigger in summary_triggers)
+
+
+def wants_technical_answer(message: str) -> bool:
+    text = message.lower().strip()
+
+    technical_triggers = [
+        "me explique",
+        "explique",
+        "explica",
+        "me ensine",
+        "ensine",
+        "como funciona",
+        "como usar",
+        "para que serve",
+        "o que é",
+        "o que e",
+        "resposta prática",
+        "resposta tecnica",
+        "resposta técnica",
+    ]
+
+    return any(trigger in text for trigger in technical_triggers)
+
+
+def build_helix_application_notes(query: str) -> str:
+    query_lower = query.lower()
+
+    if "fastapi" in query_lower and ("router" in query_lower or "apirouter" in query_lower):
+        return (
+            "- Separar rotas do Helix em arquivos próprios deixa o backend mais organizado.\n"
+            "- `/chat` pode ficar em `chat_routes.py`.\n"
+            "- `/system` pode ficar em `system_routes.py`.\n"
+            "- `/apps` pode ficar em `app_registry_routes.py`.\n"
+            "- Futuramente, `/web/search` e `/web/read` poderiam ficar em `web_routes.py`.\n"
+        )
+
+    if "pydantic" in query_lower or "basemodel" in query_lower:
+        return (
+            "- Usar `BaseModel` ajuda a validar entradas dos endpoints do Helix.\n"
+            "- Com isso, comandos, mensagens, buscas web e configurações ficam mais previsíveis.\n"
+            "- Também melhora a documentação automática do FastAPI.\n"
+        )
+
+    if "pathlib" in query_lower:
+        return (
+            "- `pathlib` pode deixar os módulos de arquivos do Helix mais limpos.\n"
+            "- É útil para scanner de projetos, leitura de pastas, Obsidian Vault e manipulação segura de caminhos.\n"
+            "- Também reduz gambiarra com string de caminho no Windows. E isso, sinceramente, já é terapia.\n"
+        )
+
+    if "react" in query_lower and "hook" in query_lower:
+        return (
+            "- Hooks podem organizar estados do frontend do Helix, como chat, voz, orb, sistema e modo web.\n"
+            "- `useState` pode cuidar de estados simples.\n"
+            "- `useEffect` pode buscar status do backend e atualizar painéis.\n"
+            "- Hooks customizados podem separar lógica como `useHelixChat`, `useSystemStatus` e `useVoiceMode`.\n"
+        )
+
+    return (
+        "- Esse conteúdo pode servir como referência técnica para decisões futuras do Helix.\n"
+        "- O ideal é transformar o aprendizado em uma melhoria concreta no código, rota, serviço ou arquitetura.\n"
+    )
+
+
+def build_web_page_response(result: WebFetchResult) -> str:
+    if not result.ok:
+        return (
+            "Não consegui acessar essa página com segurança.\n\n"
+            f"URL: `{result.url}`\n"
+            f"Domínio: `{result.domain or 'desconhecido'}`\n"
+            f"Risco: `{result.risk}`\n"
+            f"Motivo: {result.reason}"
+        )
+
+    title = result.title or "sem título detectado"
+    text = result.text or ""
+    headings = result.headings or []
+
+    summary_items = build_simple_summary(text, result.domain, max_items=5)
+    usefulness_notes = build_usefulness_notes(result)
+
+    response = (
+        "Acessei a página em modo somente leitura.\n\n"
+        f"URL: `{result.url}`\n"
+        f"Domínio: `{result.domain}`\n"
+        f"Título: {title}\n"
+        f"Bytes lidos: {result.bytes_read}\n\n"
+    )
+
+    if headings:
+        response += "Seções úteis detectadas:\n"
+
+        for heading in headings[:6]:
+            response += f"- {heading}\n"
+
+        response += "\n"
+
+    response += "Resumo limpo:\n"
+
+    for item in summary_items:
+        response += f"- {item}\n"
+
+    response += "\nPossível utilidade para o Helix:\n"
+
+    for note in usefulness_notes:
+        response += f"- {note}\n"
+
+    return response
+
+
+def build_web_search_response(query: str, results: list[WebSearchResult]) -> str:
+    if not results:
+        return (
+            "Não encontrei resultados úteis para essa pesquisa.\n\n"
+            f"Busca: `{query}`\n\n"
+            "Pode ser bloqueio do mecanismo de busca, termo muito genérico ou o HTML da busca mudou. "
+            "A internet sendo a internet: uma bagunça com protocolo."
+        )
+
+    response = (
+        "Pesquisei na web e encontrei estes resultados:\n\n"
+        f"Busca: `{query}`\n\n"
+    )
+
+    for index, result in enumerate(results, start=1):
+        response += f"{index}. **{result.title}**\n"
+        response += f"   - Domínio: `{result.domain or 'desconhecido'}`\n"
+        response += f"   - URL: `{result.url}`\n"
+
+        if result.snippet:
+            response += f"   - Resumo: {result.snippet}\n"
+
+        response += "\n"
+
+    response += "Posso ler/resumir um desses links depois, se você mandar a URL específica."
+
+    return response.strip()
+
+
+def build_search_and_summary_response(query: str, results: list[WebSearchResult]) -> str:
+    if not results:
+        return build_web_search_response(query, results)
+
+    ranked_results = rank_web_search_results(query, results)
+    best = ranked_results[0]
+
+    page_result = fetch_page_text(best.url)
+
+    if not page_result.ok:
+        response = (
+            "Pesquisei na web, mas não consegui ler a melhor fonte com segurança.\n\n"
+            f"Busca: `{query}`\n\n"
+            "Melhor resultado encontrado:\n"
+            f"- **{best.title}**\n"
+            f"- Domínio: `{best.domain or 'desconhecido'}`\n"
+            f"- URL: `{best.url}`\n\n"
+            f"Motivo da falha ao ler: {page_result.reason}\n\n"
+            "Resultados alternativos:\n"
+        )
+
+        for index, result in enumerate(ranked_results[1:4], start=1):
+            response += (
+                f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
+                f"   - URL: `{result.url}`\n"
+            )
+
+        return response.strip()
+
+    summary_items = build_practical_summary(
+        page_result.text or "",
+        page_result.domain,
+        max_items=6,
+    )
+
+    source_note = get_source_type(query, best.domain)
+
+    response = (
+        "Pesquisei na web e resumi a melhor fonte que encontrei.\n\n"
+        f"Busca: `{query}`\n"
+        f"Fonte escolhida: **{best.title}**\n"
+        f"Tipo de fonte: {source_note}\n"
+        f"Domínio: `{best.domain or page_result.domain or 'desconhecido'}`\n"
+        f"URL: `{best.url}`\n\n"
+        "Resumo:\n"
+    )
+
+    for item in summary_items:
+        response += f"- {item}\n"
+
+    response += "\nOutras fontes encontradas:\n"
+
+    for index, result in enumerate(ranked_results[1:4], start=1):
+        response += (
+            f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
+            f"   - URL: `{result.url}`\n"
+        )
+
+    return response.strip()
+
+
+def build_technical_web_answer(query: str, results: list[WebSearchResult]) -> str:
+    if not results:
+        return build_web_search_response(query, results)
+
+    ranked_results = rank_web_search_results(query, results)
+    best = ranked_results[0]
+
+    page_result = fetch_page_text(best.url)
+
+    if not page_result.ok:
+        return (
+            "Pesquisei na web, achei uma fonte promissora, mas não consegui ler a página com segurança.\n\n"
+            f"Busca: `{query}`\n"
+            f"Fonte encontrada: **{best.title}**\n"
+            f"Domínio: `{best.domain or 'desconhecido'}`\n"
+            f"URL: `{best.url}`\n\n"
+            f"Motivo: {page_result.reason}"
+        )
+
+    summary_items = build_practical_summary(
+        page_result.text or "",
+        page_result.domain,
+        max_items=6,
+    )
+
+    source_note = get_source_type(query, best.domain)
+
+    response = (
+        "Pesquisei na web e montei uma resposta técnica com base na melhor fonte.\n\n"
+        f"Busca: `{query}`\n"
+        f"Fonte usada: **{best.title}**\n"
+        f"Tipo de fonte: {source_note}\n"
+        f"Domínio: `{best.domain or page_result.domain or 'desconhecido'}`\n"
+        f"URL: `{best.url}`\n\n"
+        "Resumo prático:\n"
+    )
+
+    for item in summary_items[:3]:
+        response += f"- {item}\n"
+
+    response += "\nPontos importantes:\n"
+
+    for item in summary_items[3:6]:
+        response += f"- {item}\n"
+
+    response += "\nComo isso pode se aplicar ao Helix:\n"
+    response += build_helix_application_notes(query)
+
+    response += "\nOutras fontes encontradas:\n"
+
+    for index, result in enumerate(ranked_results[1:4], start=1):
+        response += (
+            f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
+            f"   - URL: `{result.url}`\n"
+        )
+
+    return response.strip()
+
 
 def build_search_summary_payload(query: str, results: list[WebSearchResult]) -> dict[str, Any]:
     if not results:
@@ -1350,6 +1546,7 @@ def build_search_summary_payload(query: str, results: list[WebSearchResult]) -> 
         "response": build_search_and_summary_response(query, results),
         "reason": None,
     }
+
 
 def build_technical_web_answer_payload(query: str, results: list[WebSearchResult]) -> dict[str, Any]:
     if not results:
@@ -1417,198 +1614,6 @@ def build_technical_web_answer_payload(query: str, results: list[WebSearchResult
         "reason": None,
     }
 
-def build_search_and_summary_response(query: str, results: list[WebSearchResult]) -> str:
-    if not results:
-        return build_web_search_response(query, results)
-
-    ranked_results = sorted(
-        results,
-        key=lambda item: score_search_result_for_summary(item, query),
-        reverse=True,
-    )
-
-    best = ranked_results[0]
-
-    expected_domains = get_expected_official_domains(query)
-    is_expected_official_source = (best.domain or "").lower() in expected_domains
-
-    page_result = fetch_page_text(best.url)
-
-    if not page_result.ok:
-        response = (
-            "Pesquisei na web, mas não consegui ler a melhor fonte com segurança.\n\n"
-            f"Busca: `{query}`\n\n"
-            f"Melhor resultado encontrado:\n"
-            f"- **{best.title}**\n"
-            f"- Domínio: `{best.domain or 'desconhecido'}`\n"
-            f"- URL: `{best.url}`\n\n"
-            f"Motivo da falha ao ler: {page_result.reason}\n\n"
-            "Resultados alternativos:\n"
-        )
-
-        for index, result in enumerate(ranked_results[1:4], start=1):
-            response += (
-                f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
-                f"   - URL: `{result.url}`\n"
-            )
-
-        return response.strip()
-
-    summary_items = build_practical_summary(
-        page_result.text or "",
-        page_result.domain,
-        max_items=6,
-    )
-
-    source_note = "fonte oficial esperada" if is_expected_official_source else "melhor fonte encontrada"
-
-    response = (
-        "Pesquisei na web e resumi a melhor fonte que encontrei.\n\n"
-        f"Busca: `{query}`\n"
-        f"Fonte escolhida: **{best.title}**\n"
-        f"Tipo de fonte: {source_note}\n"
-        f"Domínio: `{best.domain or page_result.domain or 'desconhecido'}`\n"
-        f"URL: `{best.url}`\n\n"
-        "Resumo:\n"
-    )
-
-    for item in summary_items:
-        response += f"- {item}\n"
-
-    response += "\nOutras fontes encontradas:\n"
-
-    for index, result in enumerate(ranked_results[1:4], start=1):
-        response += (
-            f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
-            f"   - URL: `{result.url}`\n"
-        )
-
-    return response.strip()
-
-def wants_technical_answer(message: str) -> bool:
-    text = message.lower().strip()
-
-    technical_triggers = [
-        "me explique",
-        "explique",
-        "explica",
-        "me ensine",
-        "ensine",
-        "como funciona",
-        "como usar",
-        "para que serve",
-        "o que é",
-        "o que e",
-        "resposta prática",
-        "resposta tecnica",
-        "resposta técnica",
-    ]
-
-    return any(trigger in text for trigger in technical_triggers)
-
-def build_technical_web_answer(query: str, results: list[WebSearchResult]) -> str:
-    if not results:
-        return build_web_search_response(query, results)
-
-    ranked_results = sorted(
-        results,
-        key=lambda item: score_search_result_for_summary(item, query),
-        reverse=True,
-    )
-
-    best = ranked_results[0]
-    page_result = fetch_page_text(best.url)
-
-    if not page_result.ok:
-        return (
-            "Pesquisei na web, achei uma fonte promissora, mas não consegui ler a página com segurança.\n\n"
-            f"Busca: `{query}`\n"
-            f"Fonte encontrada: **{best.title}**\n"
-            f"Domínio: `{best.domain or 'desconhecido'}`\n"
-            f"URL: `{best.url}`\n\n"
-            f"Motivo: {page_result.reason}"
-        )
-
-    expected_domains = get_expected_official_domains(query)
-    is_expected_official_source = (best.domain or "").lower() in expected_domains
-
-    summary_items = build_practical_summary(
-        page_result.text or "",
-        page_result.domain,
-        max_items=6,
-    )
-
-    source_note = "fonte oficial esperada" if is_expected_official_source else "melhor fonte encontrada"
-
-    response = (
-        "Pesquisei na web e montei uma resposta técnica com base na melhor fonte.\n\n"
-        f"Busca: `{query}`\n"
-        f"Fonte usada: **{best.title}**\n"
-        f"Tipo de fonte: {source_note}\n"
-        f"Domínio: `{best.domain or page_result.domain or 'desconhecido'}`\n"
-        f"URL: `{best.url}`\n\n"
-        "Resumo prático:\n"
-    )
-
-    for item in summary_items[:3]:
-        response += f"- {item}\n"
-
-    response += "\nPontos importantes:\n"
-
-    for item in summary_items[3:6]:
-        response += f"- {item}\n"
-
-    response += "\nComo isso pode se aplicar ao Helix:\n"
-    response += build_helix_application_notes(query)
-
-    response += "\nOutras fontes encontradas:\n"
-
-    for index, result in enumerate(ranked_results[1:4], start=1):
-        response += (
-            f"{index}. **{result.title}** — `{result.domain or 'desconhecido'}`\n"
-            f"   - URL: `{result.url}`\n"
-        )
-
-    return response.strip()
-
-def build_helix_application_notes(query: str) -> str:
-    query_lower = query.lower()
-
-    if "fastapi" in query_lower and ("router" in query_lower or "apirouter" in query_lower):
-        return (
-            "- Separar rotas do Helix em arquivos próprios deixa o backend mais organizado.\n"
-            "- `/chat` pode ficar em `chat_routes.py`.\n"
-            "- `/system` pode ficar em `system_routes.py`.\n"
-            "- `/apps` pode ficar em `app_registry_routes.py`.\n"
-            "- Futuramente, `/web/search` e `/web/read` poderiam ficar em `web_routes.py`.\n"
-        )
-
-    if "pydantic" in query_lower or "basemodel" in query_lower:
-        return (
-            "- Usar `BaseModel` ajuda a validar entradas dos endpoints do Helix.\n"
-            "- Com isso, comandos, mensagens, buscas web e configurações ficam mais previsíveis.\n"
-            "- Também melhora a documentação automática do FastAPI.\n"
-        )
-
-    if "pathlib" in query_lower:
-        return (
-            "- `pathlib` pode deixar os módulos de arquivos do Helix mais limpos.\n"
-            "- É útil para scanner de projetos, leitura de pastas, Obsidian Vault e manipulação segura de caminhos.\n"
-            "- Também reduz gambiarra com string de caminho no Windows. E isso, sinceramente, já é terapia.\n"
-        )
-
-    if "react" in query_lower and "hook" in query_lower:
-        return (
-            "- Hooks podem organizar estados do frontend do Helix, como chat, voz, orb, sistema e modo web.\n"
-            "- `useState` pode cuidar de estados simples.\n"
-            "- `useEffect` pode buscar status do backend e atualizar painéis.\n"
-            "- Hooks customizados podem separar lógica como `useHelixChat`, `useSystemStatus` e `useVoiceMode`.\n"
-        )
-
-    return (
-        "- Esse conteúdo pode servir como referência técnica para decisões futuras do Helix.\n"
-        "- O ideal é transformar o aprendizado em uma melhoria concreta no código, rota, serviço ou arquitetura.\n"
-    )
 
 def infer_web_mode_from_message(message: str) -> str | None:
     """
@@ -1643,7 +1648,6 @@ def handle_web_chat_intent(message: str) -> str | None:
     """
     Handler principal para o /chat usar o motor web.
 
-    Mantém o chat_service mais limpo:
     - detecta modo
     - extrai URL/query
     - executa leitura/busca/resumo/explicação
@@ -1702,10 +1706,12 @@ def handle_web_chat_intent(message: str) -> str | None:
 
     return None
 
+
 def handle_web_access_intent(message: str) -> str | None:
     """
     Compatibilidade com o chat_service atual.
 
     Internamente delega para handle_web_chat_intent.
     """
+
     return handle_web_chat_intent(message)
