@@ -1610,22 +1610,57 @@ def build_helix_application_notes(query: str) -> str:
         "- O ideal é transformar o aprendizado em uma melhoria concreta no código, rota, serviço ou arquitetura.\n"
     )
 
-def handle_web_access_intent(message: str) -> str | None:
+def infer_web_mode_from_message(message: str) -> str | None:
     """
-    Detecta pedidos simples de leitura de URL e pesquisa web.
+    Infere o modo web a partir da mensagem natural do usuário.
 
-    Exemplos:
-    - "leia https://fastapi.tiangolo.com/"
-    - "consulta https://docs.sqlalchemy.org/"
-    - "resuma https://www.postgresql.org/docs/"
-    - "pesquise na internet sobre FastAPI routers"
-    - "procure na web sobre Pydantic BaseModel"
+    Retornos:
+    - read
+    - search
+    - summary
+    - explain
+    - None
     """
 
-    lowered = message.lower()
     url = extract_url_from_message(message)
 
     if url:
+        return "read"
+
+    if not is_web_search_intent(message):
+        return None
+
+    if wants_technical_answer(message):
+        return "explain"
+
+    if wants_search_and_summary(message):
+        return "summary"
+
+    return "search"
+
+
+def handle_web_chat_intent(message: str) -> str | None:
+    """
+    Handler principal para o /chat usar o motor web.
+
+    Mantém o chat_service mais limpo:
+    - detecta modo
+    - extrai URL/query
+    - executa leitura/busca/resumo/explicação
+    """
+
+    mode = infer_web_mode_from_message(message)
+
+    if not mode:
+        return None
+
+    if mode == "read":
+        lowered = message.lower()
+        url = extract_url_from_message(message)
+
+        if not url:
+            return None
+
         trigger_words = [
             "leia",
             "ler",
@@ -1649,18 +1684,28 @@ def handle_web_access_intent(message: str) -> str | None:
         result = fetch_page_text(url)
         return build_web_page_response(result)
 
-    if is_web_search_intent(message):
-        query = extract_search_query(message)
+    query = extract_search_query(message)
 
-        if not query:
-            return "Entendi que você quer pesquisar na web, mas não achei o termo da busca."
+    if not query:
+        return "Entendi que você quer usar a web, mas não achei o termo da busca."
 
-        results = fetch_web_search_results(query)
+    results = fetch_web_search_results(query)
 
-        if wants_technical_answer(message):
-            return build_technical_web_answer(query, results)
+    if mode == "explain":
+        return build_technical_web_answer(query, results)
 
-        if wants_search_and_summary(message):
-            return build_search_and_summary_response(query, results)
+    if mode == "summary":
+        return build_search_and_summary_response(query, results)
 
+    if mode == "search":
         return build_web_search_response(query, results)
+
+    return None
+
+def handle_web_access_intent(message: str) -> str | None:
+    """
+    Compatibilidade com o chat_service atual.
+
+    Internamente delega para handle_web_chat_intent.
+    """
+    return handle_web_chat_intent(message)
