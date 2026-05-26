@@ -34,6 +34,70 @@ SEARCH_RESULT_BLOCKED_DOMAINS = {
     "www.duckduckgo.com",
 }
 
+OFFICIAL_SOURCE_MAP = {
+    "fastapi": [
+        "fastapi.tiangolo.com",
+    ],
+    "pydantic": [
+        "pydantic.dev",
+    ],
+    "python": [
+        "docs.python.org",
+    ],
+    "sqlalchemy": [
+        "docs.sqlalchemy.org",
+    ],
+    "postgres": [
+        "www.postgresql.org",
+        "postgresql.org",
+    ],
+    "postgresql": [
+        "www.postgresql.org",
+        "postgresql.org",
+    ],
+    "javascript": [
+        "developer.mozilla.org",
+    ],
+    "html": [
+        "developer.mozilla.org",
+    ],
+    "css": [
+        "developer.mozilla.org",
+    ],
+    "mdn": [
+        "developer.mozilla.org",
+    ],
+    "react": [
+        "react.dev",
+    ],
+    "vite": [
+        "vite.dev",
+    ],
+    "tailwind": [
+        "tailwindcss.com",
+    ],
+    "github": [
+        "docs.github.com",
+        "github.com",
+    ],
+    "openai": [
+        "platform.openai.com",
+        "openai.com",
+    ],
+    "ollama": [
+        "ollama.com",
+    ],
+    "obsidian": [
+        "help.obsidian.md",
+    ],
+    "vscode": [
+        "code.visualstudio.com",
+    ],
+    "visual studio code": [
+        "code.visualstudio.com",
+    ],
+}
+
 ALLOWED_DOMAINS = {
     # Docs / programação
     "docs.python.org",
@@ -741,6 +805,30 @@ def is_web_search_intent(message: str) -> bool:
 
     return any(trigger in text for trigger in search_triggers)
 
+def clean_search_query(query: str) -> str:
+    query = query.strip()
+
+    suffix_patterns = [
+        r"\s+e\s+resuma\s*$",
+        r"\s+e\s+resume\s*$",
+        r"\s+e\s+leia\s*$",
+        r"\s+e\s+ler\s*$",
+        r"\s+e\s+explique\s*$",
+        r"\s+e\s+me\s+explique\s*$",
+        r"\s+e\s+resuma\s+a\s+melhor\s+fonte\s*$",
+        r"\s+e\s+leia\s+a\s+melhor\s+fonte\s*$",
+        r"\s+resuma\s+a\s+melhor\s+fonte\s*$",
+        r"\s+leia\s+a\s+melhor\s+fonte\s*$",
+        r"\s+resuma\s+o\s+melhor\s+resultado\s*$",
+        r"\s+leia\s+o\s+melhor\s+resultado\s*$",
+    ]
+
+    for pattern in suffix_patterns:
+        query = re.sub(pattern, "", query, flags=re.IGNORECASE).strip()
+
+    query = re.sub(r"[?.!]+$", "", query).strip()
+
+    return query
 
 def extract_search_query(message: str) -> str:
     text = message.strip()
@@ -772,7 +860,7 @@ def extract_search_query(message: str) -> str:
 
         if match:
             query = text[match.start(1):].strip()
-            return re.sub(r"[?.!]+$", "", query).strip()
+            return clean_search_query(query)
 
     return ""
 
@@ -930,15 +1018,38 @@ def wants_search_and_summary(message: str) -> bool:
 
     return any(trigger in lowered for trigger in search_and_summary_triggers)
 
+def get_expected_official_domains(query: str) -> list[str]:
+    query_lower = query.lower()
+    expected_domains: list[str] = []
+
+    for keyword, domains in OFFICIAL_SOURCE_MAP.items():
+        if keyword in query_lower:
+            expected_domains.extend(domains)
+
+    unique_domains = []
+    seen = set()
+
+    for domain in expected_domains:
+        if domain in seen:
+            continue
+
+        seen.add(domain)
+        unique_domains.append(domain)
+
+    return unique_domains
+
 def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
     score = 0
 
     domain = (result.domain or "").lower()
     title = (result.title or "").lower()
     url = (result.url or "").lower()
+    snippet = (result.snippet or "").lower()
     query_lower = query.lower()
 
-    official_domains = [
+    expected_official_domains = get_expected_official_domains(query)
+
+    general_official_domains = [
         "fastapi.tiangolo.com",
         "pydantic.dev",
         "docs.python.org",
@@ -952,7 +1063,10 @@ def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
         "docs.github.com",
         "learn.microsoft.com",
         "platform.openai.com",
+        "openai.com",
         "ollama.com",
+        "help.obsidian.md",
+        "code.visualstudio.com",
     ]
 
     lower_quality_domains = [
@@ -961,21 +1075,48 @@ def score_search_result_for_summary(result: WebSearchResult, query: str) -> int:
         "datacamp.com",
     ]
 
-    if domain in official_domains:
-        score += 50
+    if domain in expected_official_domains:
+        score += 90
 
-    if any(part in url for part in ["/docs", "/tutorial", "/reference", "/learn"]):
-        score += 15
+    elif domain in general_official_domains:
+        score += 45
 
-    for word in query_lower.split():
-        if len(word) >= 4 and word in title:
-            score += 8
+    if any(part in url for part in ["/docs", "/documentation", "/tutorial", "/reference", "/learn", "/guide"]):
+        score += 18
 
-    if "official" in title or "docs" in title or "documentation" in title:
+    if "docs" in title or "documentation" in title:
+        score += 14
+
+    if "reference" in title or "api" in title:
         score += 10
 
+    if "tutorial" in title or "guide" in title:
+        score += 8
+
+    query_words = [
+        word
+        for word in re.split(r"\W+", query_lower)
+        if len(word) >= 4
+    ]
+
+    for word in query_words:
+        if word in title:
+            score += 8
+
+        if word in url:
+            score += 5
+
+        if word in snippet:
+            score += 3
+
     if domain in lower_quality_domains:
-        score -= 15
+        score -= 25
+
+    if "medium.com" in url:
+        score -= 20
+
+    if "login" in url or "signin" in url or "signup" in url:
+        score -= 30
 
     return score
 
@@ -990,6 +1131,9 @@ def build_search_and_summary_response(query: str, results: list[WebSearchResult]
     )
 
     best = ranked_results[0]
+
+    expected_domains = get_expected_official_domains(query)
+    is_expected_official_source = (best.domain or "").lower() in expected_domains
 
     page_result = fetch_page_text(best.url)
 
@@ -1019,10 +1163,13 @@ def build_search_and_summary_response(query: str, results: list[WebSearchResult]
         max_items=6,
     )
 
+    source_note = "fonte oficial esperada" if is_expected_official_source else "melhor fonte encontrada"
+
     response = (
         "Pesquisei na web e resumi a melhor fonte que encontrei.\n\n"
         f"Busca: `{query}`\n"
         f"Fonte escolhida: **{best.title}**\n"
+        f"Tipo de fonte: {source_note}\n"
         f"Domínio: `{best.domain or page_result.domain or 'desconhecido'}`\n"
         f"URL: `{best.url}`\n\n"
         "Resumo:\n"
